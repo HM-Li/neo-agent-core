@@ -1,6 +1,6 @@
 import copy
 import os
-from typing import Any, Union
+from typing import Any, List, Union
 
 from google import genai
 from google.genai import types
@@ -21,13 +21,9 @@ class GoogleAIModel(BaseChatModel):
     Note: this model is still under development and may not be fully functional.
     """
 
-    def _check_params(self):
-        unsupported_params = ["tools", "mcp_clients"]
-        for param in unsupported_params:
-            if getattr(self, param) is not None:
-                raise ValueError(
-                    f"GoogleAIModel does not support `{param}` parameter. Please remove it."
-                )
+    @property
+    def unsupported_params(self) -> List[str]:
+        return ["tools", "mcp_clients"]
 
     def create_client(self):
         # by default the client prioritize GOOGLE_API_KEY instead of GEMINI_API_KEY
@@ -94,18 +90,19 @@ class GoogleAIModel(BaseChatModel):
                 messages.append(msg)
                 previous_role = context.provider_role
 
-        if base_thread is not None:
-            # previous role must be None or assistant
-            if previous_role is not None and previous_role != Role.ASSISTANT:
+        if base_thread is not None and len(base_thread) > 0:
+            # the last context of the base thread must be from the assistant
+            last_context = await base_thread.aget_context(-1)
+            if last_context.provider_role != Role.ASSISTANT:
                 raise ValueError(
-                    "The last context must be from the assistant or None if base_thread is provided"
+                    "The last context of the base thread must be from the assistant"
                 )
 
             # convert base thread to a list of messages
             base_messages = await self.thread_to_prompt(base_thread, None)
-            if len(base_messages) > 0:
-                # append the last message of the base thread to the current thread
-                messages = base_messages + messages
+
+            # append the last message of the base thread to the current thread
+            messages = base_messages + messages
         return messages
 
     async def prepare_config(
@@ -151,6 +148,13 @@ class GoogleAIModel(BaseChatModel):
             **configs_copy,  # Add remaining configs
         }
 
+        # Add thinking configuration if enabled
+        if self.enable_thinking:
+            gen_config_args["thinking_config"] = types.ThinkingConfig(
+                include_thoughts=True,
+                thinking_budget=self.thinking_budget_tokens,
+            )
+
         if instruction:  # Only add system_instruction if it's not None and not empty
             gen_config_args["system_instruction"] = instruction
 
@@ -159,15 +163,32 @@ class GoogleAIModel(BaseChatModel):
         return messages, final_configs, thread
 
     async def add_response_to_thread(self, thread, response):
-        if response.parsed is not None:
-            response = response.parsed[0]
-        else:
-            response = response.text
+        contents = []
 
-        if not isinstance(response, str):
-            response = str(response)
+        # Handle thinking content if present
+        if hasattr(response, "candidates") and response.candidates:
+            candidate = response.candidates[0]
+            if hasattr(candidate, "content") and hasattr(candidate.content, "parts"):
+                for part in candidate.content.parts:
+                    if hasattr(part, "thought") and part.thought:
+                        # Log thinking content similar to Anthropic implementation
+                        self.logger.info(f"Thinking: {part.text}")
+                    elif hasattr(part, "text") and part.text:
+                        contents.append(TextContent(data=part.text))
 
-        context = Context(contents=response, provider_role=Role.ASSISTANT)
+        # Fallback to existing logic if no parts found
+        if not contents:
+            if response.parsed is not None:
+                response_text = response.parsed[0]
+            else:
+                response_text = response.text
+
+            if not isinstance(response_text, str):
+                response_text = str(response_text)
+
+            contents.append(TextContent(data=response_text))
+
+        context = Context(contents=contents, provider_role=Role.ASSISTANT)
         await thread.append_context(context)
 
     async def acreate(

@@ -60,6 +60,10 @@ class BaseChatModel(ABC):
         If "auto", the model will automatically choose the tool to use. If "required", the tool must be specified.
     timeaware : bool, default False
         If True, the model will be time-aware and include the current UTC time in the instruction.
+    enable_thinking : bool, default False
+        If True, enables thinking mode for the model (currently supported by Anthropic models).
+    thinking_budget_tokens : int, default 1024
+        The number of tokens allocated for thinking when thinking mode is enabled.
     """
 
     PROMPT_TEMPLATE = {
@@ -85,6 +89,8 @@ class BaseChatModel(ABC):
         mcp_clients: Optional[List[MCPClient]] = None,
         tool_choice: Literal["auto", "required"] = "auto",
         timeaware: bool = False,
+        enable_thinking: bool = False,
+        thinking_budget_tokens: int = 1024,
     ):
         if (
             sum(
@@ -117,6 +123,8 @@ class BaseChatModel(ABC):
         self.mcp_clients = mcp_clients
         self.tool_choice = tool_choice
         self.timeaware = timeaware
+        self.enable_thinking = enable_thinking
+        self.thinking_budget_tokens = thinking_budget_tokens
 
         self._logger = None
         self.client = self.create_client()
@@ -125,13 +133,24 @@ class BaseChatModel(ABC):
 
         self._check_params()
 
+    @property
     @abstractmethod
-    def _check_params(self) -> None:
+    def unsupported_params(self) -> List[str]:
         """
-        Check if the parameters are supported.
+        List of parameter names that are not supported by this model.
         Must be implemented by subclasses.
         """
         pass
+
+    def _check_params(self) -> None:
+        """
+        Check if the parameters are supported using the unsupported_params property.
+        """
+        for param in self.unsupported_params:
+            if getattr(self, param) is not None:
+                raise ValueError(
+                    f"{self.__class__.__name__} does not support `{param}` parameter. Please remove it."
+                )
 
     @property
     def logger(self):
@@ -517,5 +536,4 @@ class BaseChatModel(ABC):
         out = ToolOutputContent(
             tool_use_id=content.tool_use_id, contents=_out, is_error=is_error
         )
-        return out
         return out

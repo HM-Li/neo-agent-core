@@ -6,8 +6,7 @@ from neo.mcp.client import MCPClient
 from neo.models.providers.anthropic import AnthropicModel
 from neo.models.providers.base import BaseChatModel
 from neo.models.providers.google import GoogleAIModel
-from neo.models.providers.openai import (OpenAICompleteModel,
-                                         OpenAIResponseModel)
+from neo.models.providers.openai import OpenAICompleteModel, OpenAIResponseModel
 from neo.models.providers.xai import XAIModel
 from neo.tools import Tool
 from neo.types.modalities import Modality
@@ -92,6 +91,8 @@ class ModelRegistry(metaclass=Singleton):
         mcp_clients: Optional[List[MCPClient]] = None,
         tool_choice: Literal["auto", "required"] = "auto",
         timeaware: bool = False,
+        enable_thinking: bool = False,
+        thinking_budget_tokens: int = 1024,
     ) -> BaseChatModel:
         """
         Create an instance of a registered model.
@@ -136,6 +137,8 @@ class ModelRegistry(metaclass=Singleton):
             mcp_clients=mcp_clients,
             tool_choice=tool_choice,
             timeaware=timeaware,
+            enable_thinking=enable_thinking,
+            thinking_budget_tokens=thinking_budget_tokens,
         )
         return model_instance
 
@@ -150,7 +153,7 @@ class ModelRegistry(metaclass=Singleton):
             A dictionary of all registered models.
         """
         return self._registry
-    
+
     def check_model_input_modalities(self, model: str) -> List[Modality]:
         """
         Get the input modalities for a registered model.
@@ -214,7 +217,7 @@ models = [
         [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
     ),
     (
-        "claude-3-7-sonnet-20250219",
+        "claude-3-7-sonnet-latest",
         AnthropicModel,
         [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
     ),
@@ -222,6 +225,16 @@ models = [
         "claude-3-5-haiku-latest",
         AnthropicModel,
         [Modality.TEXT, Modality.STRUCTURED, Modality.DOCUMENT],
+    ),
+    (
+        "claude-sonnet-4-20250514",
+        AnthropicModel,
+        [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
+    ),
+    (
+        "claude-opus-4-20250514",
+        AnthropicModel,
+        [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
     ),
     (
         "gemini-2.0-flash",

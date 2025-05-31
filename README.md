@@ -12,7 +12,7 @@ uv pip install -e .
 
 ## Getting Started
 
-Check out our example notebooks to learn how to use neo:
+Check out example notebooks to learn how to use neo:
 - [LLM Interaction Management: Thread](./examples/content-context-thread.ipynb) - Learn how to manage conversation history with `threads`
 - [Getting Started with Neo](./examples/agentic/neo.ipynb) - Basic introduction to using `neo`
 - [Working with Different Models](./examples/models) - Lower level api for model providers

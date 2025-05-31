@@ -12,18 +12,27 @@ from neo.contexts.context import Context
 from neo.mcp.client import MCPClient
 from neo.models.providers.base import BaseChatModel
 from neo.tools import BaseTool, Tool
-from neo.types.contents import (AudioContent, AudioTextContent, BooleanContent,
-                                DocumentContent, DocumentTextContent,
-                                ImageContent, RawContent, TextContent,
-                                ToolInputContent, ToolOutputContent)
-from neo.types.errors import (ContextLengthExceededError, ModelServiceError,
-                              ToolError)
+from neo.types.contents import (
+    AudioContent,
+    AudioTextContent,
+    BooleanContent,
+    DocumentContent,
+    DocumentTextContent,
+    ImageContent,
+    RawContent,
+    TextContent,
+    ToolInputContent,
+    ToolOutputContent,
+)
+from neo.types.errors import ContextLengthExceededError, ModelServiceError, ToolError
 from neo.types.roles import Role
-from neo.utils.file_handling import (base64_str_to_binary,
-                                     binary_to_base64_str,
-                                     extract_text_from_pdf,
-                                     fetch_url_as_base64_str,
-                                     reformat_audio_bytes)
+from neo.utils.file_handling import (
+    base64_str_to_binary,
+    binary_to_base64_str,
+    extract_text_from_pdf,
+    fetch_url_as_base64_str,
+    reformat_audio_bytes,
+)
 
 
 class OpenAICompleteModel(BaseChatModel):
@@ -42,17 +51,10 @@ class OpenAICompleteModel(BaseChatModel):
             "input_audio": {"data": "{data}", "format": "{format}"},
         },
     }
-    
-    def _check_params(self):
-        unsupported_params = [
-            "tools",
-            "mcp_clients"
-        ]
-        for param in unsupported_params:
-            if getattr(self, param) is not None:
-                raise ValueError(
-                    f"This model does not support `{param}` parameter. Please remove it."
-                )
+
+    @property
+    def unsupported_params(self) -> List[str]:
+        return ["tools", "mcp_clients"]
 
     def context_to_prompt(self, context, add_role: bool = True):
         """convert context to a user prompt message following the default api template"""
@@ -272,9 +274,11 @@ class OpenAIResponseModel(BaseChatModel):
             "output": "{output}",
         },
     }
-    def _check_params(self):
-        # this model supports all params
-        pass
+
+    @property
+    def unsupported_params(self) -> List[str]:
+        # OpenAI Response API doesn't support thinking yet
+        return ["enable_thinking", "thinking_budget_tokens"]
 
     async def context_to_prompt(self, context, add_role: bool = True):
         """convert context to a user prompt message following the default api template"""
@@ -569,7 +573,7 @@ class OpenAIResponseModel(BaseChatModel):
 
                 # create context for the assistant
                 output_context = Context(
-                    contents=result_text,
+                    contents=contents,
                     provider_role=Role.ASSISTANT,
                     provider_name=self.model,
                     provider_context_id=item.id,
@@ -604,9 +608,9 @@ class OpenAIResponseModel(BaseChatModel):
                     )
                 )
             elif item.type == "reasoning":
+                # Handle reasoning (thinking) blocks from OpenAI
                 for summary in item.summary:
                     self.logger.info(f"Reasoning: {summary.text}")
-
         # add response to thread
         await thread.append_contexts(contexts)
 

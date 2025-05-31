@@ -17,6 +17,7 @@ from neo.types.contents import (
     ImageContent,
     RawContent,
     TextContent,
+    ThoughtContent,
     ToolInputContent,
     ToolOutputContent,
 )
@@ -82,8 +83,10 @@ class AnthropicModel(BaseChatModel):
         },
     }
 
-    def _check_params(self):
-        pass
+    @property
+    def unsupported_params(self) -> List[str]:
+        # Anthropic supports all parameters including thinking
+        return []
 
     def create_client(self):
         return anthropic.AsyncAnthropic(api_key=self.custom_api_key)
@@ -199,7 +202,9 @@ class AnthropicModel(BaseChatModel):
         return prompt
 
     async def prepare_config(
-        self, user_input: str | Context | Thread, base_thread: Thread
+        self,
+        user_input: str | Context | Thread,
+        base_thread: Thread,
     ) -> dict:
         """Anthropic requires a max_token parameter in the config."""
 
@@ -253,6 +258,13 @@ class AnthropicModel(BaseChatModel):
                 "No max_tokens provided, using default value of 2048 since Anthropic requires `max_tokens` parameter."
             )
 
+        # Add thinking configuration if enabled
+        if self.enable_thinking:
+            configs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": self.thinking_budget_tokens,
+            }
+
         return messages, configs, thread
 
     @staticmethod
@@ -301,8 +313,13 @@ class AnthropicModel(BaseChatModel):
             if item.type == "text":
                 contents.append(TextContent(data=item.text))
 
+            elif item.type == "thinking":
+                # Handle thinking content from Anthropic
+                thinking_text = getattr(item, "thinking", None)
+                self.logger.info(f"Thinking: {thinking_text}")
+
             elif item.type == "tool_use":
-                # handle strucrured response differently
+                # handle structured response differently
                 if self.boolean_response is True:
                     self.structured_response_model = BooleanContent
 
@@ -354,7 +371,8 @@ class AnthropicModel(BaseChatModel):
     ) -> Thread:
         try:
             messages, configs, thread = await self.prepare_config(
-                user_input, base_thread=base_thread
+                user_input,
+                base_thread=base_thread,
             )
 
             self.logger.info(f"Sending Claude API Request with Configs: {configs}")
@@ -373,6 +391,17 @@ class AnthropicModel(BaseChatModel):
 
             if return_response_object is True:
                 return response
+
+            # Handle refusal stop reason for Claude 4 models
+            if getattr(response, "stop_reason", None) == "refusal":
+                # Extract the partial content as the refusal message
+                refusal_message = ""
+                if response.content:
+                    for item in response.content:
+                        if item.type == "text":
+                            refusal_message = item.text
+                            break
+                raise ModelServiceError(f"Content refused: {refusal_message}")
 
             await self.add_response_to_thread(thread=thread, response=response)
 

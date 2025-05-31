@@ -1,9 +1,11 @@
 from __future__ import annotations  # for TYPE_CHECKING
-from pydantic import BaseModel, field_validator, Field
-from typing import ClassVar, Optional, TYPE_CHECKING, List, Any
 
-from neo.types.modalities import Modality
+from typing import TYPE_CHECKING, Any, ClassVar, List, Optional
+
+from pydantic import BaseModel, Field, field_validator
+
 from neo.tools import Tool
+from neo.types.modalities import Modality
 
 
 class BaseContent(BaseModel):
@@ -38,6 +40,16 @@ class RawContent(BaseContent):
 class TextContent(BaseContent):
     data: str
     modality: ClassVar[Modality] = Modality.TEXT
+
+
+class ThoughtContent(BaseContent):
+    """In some cases, maintain a stream of thoughts or reasoning is important for the model. E.g. tool use."""
+
+    thought_id: str
+    data: Optional[List[str]] = Field(
+        default=None, description="List of thoughts. None for redacted thoughts."
+    )
+    modality: ClassVar[Modality] = Modality.THOUGHT
 
 
 class _BytesUrlContentMixin:

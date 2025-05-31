@@ -12,6 +12,7 @@ class Modality(Enum):
     VIDEO = "video"
     DOCUMENT = "document"  # pdf, text, json, etc.
     STRUCTURED = "structured"  # dict, etc.
+    THOUGHT = "thought"  # used for thought content
     UNDEFINED = "undefined"  # used when the modality is not defined
 
     def __repr__(self):
