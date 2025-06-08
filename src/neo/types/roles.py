@@ -8,6 +8,7 @@ class Role(enum.Enum):
     ASSISTANT = "assistant"
     DEVELOPER = "developer"
     SYSTEM = "system"
+    TOOL = "tool"
     UNDEFINED = (
         "undefined"  # Use this for cases where the role is not defined or is unknown
     )

@@ -3,6 +3,7 @@ from inspect import signature
 from neo.agentic.model_registry import ModelRegistry
 from neo.models.providers.anthropic import AnthropicModel
 from neo.models.providers.base import BaseChatModel
+from neo.models.providers.openai import OpenAIResponseModel
 from neo.types.modalities import Modality
 
 
@@ -33,24 +34,18 @@ def test_new_claude_models_registered():
     registry = ModelRegistry()
 
     # Test Claude Sonnet 4 registration
-    assert "claude-sonnet-4-20250514" in registry.get_all_models()
+    assert "claude-sonnet-4-20250514" in registry.supported_models
 
     # Test Claude Opus 4 registration
-    assert "claude-opus-4-20250514" in registry.get_all_models()
+    assert "claude-opus-4-20250514" in registry.supported_models
 
     # Test that they map to AnthropicModel
-    all_models = registry.get_all_models()
+    all_models = registry.supported_models
     sonnet4_info = all_models["claude-sonnet-4-20250514"]
     opus4_info = all_models["claude-opus-4-20250514"]
 
-    assert (
-        sonnet4_info.get("model_class") == AnthropicModel
-        or sonnet4_info.get("cls") == AnthropicModel
-    )
-    assert (
-        opus4_info.get("model_class") == AnthropicModel
-        or opus4_info.get("cls") == AnthropicModel
-    )
+    assert sonnet4_info.get("class") == AnthropicModel
+    assert opus4_info.get("class") == AnthropicModel
 
 
 def test_new_claude_models_support_multimodal():
@@ -100,3 +95,20 @@ def test_create_new_claude_models_with_thinking():
     assert isinstance(model, AnthropicModel)
     assert model.enable_thinking is True
     assert model.thinking_budget_tokens == 1024
+
+
+def test_create_openai_model_with_none_thinking_params():
+    """Test that OpenAI models can be created with None thinking parameters without AttributeError."""
+    registry = ModelRegistry()
+
+    # Test creating OpenAI model with None thinking parameters
+    # This should not raise an AttributeError even though OpenAI models don't support thinking
+    model = registry.create_model(
+        model="gpt-4.1",
+        enable_thinking=None,
+        thinking_budget_tokens=None,
+    )
+
+    assert isinstance(model, OpenAIResponseModel)
+    # OpenAI models shouldn't have thinking attributes set when they're None
+    assert not hasattr(model, 'thinking_budget_tokens') or model.enable_thinking is None

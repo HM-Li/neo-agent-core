@@ -47,73 +47,100 @@ class GoogleAIModel(BaseChatModel):
         raise NotImplementedError("GoogleAIModel does not have a base URL")
 
     def context_to_prompt(self, context: Context) -> dict:
-        # only support user and assistant roles
+        """
+        Convert a single Context to Google GenAI Parts.
+        Required by base class but not used in our thread_to_prompt override.
+        """
+        # Only support user and assistant roles
         if context.provider_role not in [Role.USER, Role.ASSISTANT]:
             raise ValueError(
                 "Only user and assistant roles are supported by GoogleAIModel"
             )
 
-        # currently only text is supported
-        if context.require_multimodal:
-            raise ValueError("Multimodal context is not supported by GoogleAIModel")
+        # Convert context contents to Google GenAI Parts
+        parts = []
+        for content in context.contents:
+            if isinstance(content, TextContent):
+                parts.append(types.Part.from_text(text=content.data))
+            # TODO: Add support for other content types (images, documents, etc.)
+            # elif isinstance(content, ImageContent):
+            #     parts.append(types.Part.from_uri(...))
 
-        data = [c.data for c in context.contents if isinstance(c, TextContent)]
+        if not parts:
+            raise ValueError("No valid content found in context")
 
-        if len(data) == 0:
-            raise ValueError("No text content provided")
-
-        if len(data) > 1:
-            raise ValueError("Only one text content is supported")
-
-        return data[0]
+        return {"parts": parts, "role": context.provider_role}
 
     async def thread_to_prompt(
-        self, thread: Thread, base_thread: Thread
-    ) -> list:  # google api requires a list of messages with alternate roles
-        messages = []
+        self, thread: Thread, base_thread: Thread = None
+    ) -> list[types.Content]:
+        """
+        Convert Neo threads to Google GenAI Content objects.
+        Supports consecutive messages from the same role by merging them.
+        """
+        # Combine base_thread and thread
+        all_contexts = []
+        if base_thread is not None:
+            async for context in base_thread:
+                all_contexts.append(context)
+        async for context in thread:
+            all_contexts.append(context)
 
-        previous_role = None
-        # must start with a user message
-        if len(thread) > 0:
-            first_context = await thread.aget_context(0)
-            if first_context.provider_role != Role.USER:
-                raise ValueError("The first context must be from the user")
+        if not all_contexts:
+            return []
 
-            async for context in thread:
-                if context.provider_role == previous_role:
-                    raise ValueError("Consecutive contexts cannot have the same role")
+        # Group consecutive messages by role
+        native_contents = []
+        current_role = None
+        current_parts = []
 
-                if self.input_modalities is not None:
-                    await self.acheck_context_modality(context)
+        for context in all_contexts:
+            if self.input_modalities is not None:
+                await self.acheck_context_modality(context)
 
-                msg = self.context_to_prompt(context)
-                messages.append(msg)
-                previous_role = context.provider_role
+            role = context.provider_role
 
-        if base_thread is not None and len(base_thread) > 0:
-            # the last context of the base thread must be from the assistant
-            last_context = await base_thread.aget_context(-1)
-            if last_context.provider_role != Role.ASSISTANT:
-                raise ValueError(
-                    "The last context of the base thread must be from the assistant"
-                )
+            # If role changes, finalize current content and start new one
+            if current_role is not None and role != current_role:
+                content = self._create_content(current_parts, current_role)
+                if content:
+                    native_contents.append(content)
+                current_parts = []
 
-            # convert base thread to a list of messages
-            base_messages = await self.thread_to_prompt(base_thread, None)
+            # Convert context to parts
+            context_data = self.context_to_prompt(context)
+            current_parts.extend(context_data["parts"])
+            current_role = role
 
-            # append the last message of the base thread to the current thread
-            messages = base_messages + messages
-        return messages
+        # Finalize the last content
+        if current_parts and current_role is not None:
+            content = self._create_content(current_parts, current_role)
+            if content:
+                native_contents.append(content)
+
+        return native_contents
+
+    def _create_content(self, parts: list[types.Part], role: Role) -> types.Content:
+        """Create native Google GenAI Content from parts and role."""
+        if not parts:
+            return None
+
+        if role == Role.USER:
+            return types.UserContent(parts=parts)
+        elif role == Role.ASSISTANT:
+            return types.ModelContent(parts=parts)
+        else:
+            raise ValueError(f"Unsupported role: {role}")
 
     async def prepare_config(
         self, user_input: str | Context | Thread, base_thread: Thread
     ) -> dict:
         # prepare a thread from user_input
         thread = await self.prepare_thread(user_input)
-        # convert thread to a list of messages
-        messages = await self.thread_to_prompt(thread, base_thread=base_thread)
+        # convert thread to a list of Content objects
+        native_contents = await self.thread_to_prompt(thread, base_thread=base_thread)
 
-        if len(messages) == 0:
+        if len(native_contents) == 0:
             raise ValueError("No valid content provided")
 
         # response format
@@ -160,7 +187,7 @@ class GoogleAIModel(BaseChatModel):
 
         final_configs = types.GenerateContentConfig(**gen_config_args)
 
-        return messages, final_configs, thread
+        return native_contents, final_configs, thread
 
     async def add_response_to_thread(self, thread, response):
         contents = []
@@ -172,7 +199,7 @@ class GoogleAIModel(BaseChatModel):
                 for part in candidate.content.parts:
                     if hasattr(part, "thought") and part.thought:
                         # Log thinking content similar to Anthropic implementation
-                        self.logger.info(f"Thinking: {part.text}")
+                        self.logger.thinking(part.text)
                     elif hasattr(part, "text") and part.text:
                         contents.append(TextContent(data=part.text))
 
@@ -199,7 +226,7 @@ class GoogleAIModel(BaseChatModel):
         return_generated_thread: bool = False,
     ) -> Thread:
 
-        messages, configs, thread = await self.prepare_config(
+        native_contents, configs, thread = await self.prepare_config(
             user_input, base_thread=base_thread
         )
         self.logger.info(f"Sending Google API Request with Configs: {configs}")
@@ -207,7 +234,7 @@ class GoogleAIModel(BaseChatModel):
         try:
             response = await self.client.aio.models.generate_content(
                 model=self.model,
-                contents=messages,
+                contents=native_contents,
                 config=configs,
             )
         except Exception as e:

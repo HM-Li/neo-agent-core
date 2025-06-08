@@ -27,6 +27,10 @@ class Thread:
             for context in contexts:
                 self._append_context(context)
 
+    def __iter__(self):
+        """Iterate over the contexts in the thread."""
+        return iter(self._contexts)
+
     async def __aiter__(self):
         """Asynchronously iterate over a snapshot of contexts."""
         async with self._lock:

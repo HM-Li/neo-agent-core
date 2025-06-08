@@ -52,7 +52,7 @@ class ModelRegistry(metaclass=Singleton):
             raise ValueError(f"A model is already registered under the model '{model}'")
         self._registry[model] = {"class": cls, "input_modalities": input_modalities}
 
-    def get_model_registry(self, model: str) -> type:
+    def get_model_registry(self, model: str) -> dict:
         """
         Retrieve a previously registered model by model name.
 
@@ -91,8 +91,8 @@ class ModelRegistry(metaclass=Singleton):
         mcp_clients: Optional[List[MCPClient]] = None,
         tool_choice: Literal["auto", "required"] = "auto",
         timeaware: bool = False,
-        enable_thinking: bool = False,
-        thinking_budget_tokens: int = 1024,
+        enable_thinking: bool = None,
+        thinking_budget_tokens: int = None,
     ) -> BaseChatModel:
         """
         Create an instance of a registered model.
@@ -257,6 +257,8 @@ models = [
         [Modality.TEXT],
     ),
     ("grok-2", XAIModel, [Modality.TEXT, Modality.STRUCTURED]),
+    ("grok-3-mini", XAIModel, [Modality.TEXT, Modality.STRUCTURED]),
+    ("grok-3", XAIModel, [Modality.TEXT, Modality.STRUCTURED]),
 ]
 
 # Register models

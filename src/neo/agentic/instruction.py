@@ -2,6 +2,8 @@ from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from neo.types.tool_codes import StandardToolCode
+
 
 class ModelConfigs(BaseModel, extra="allow"):
     """
@@ -39,9 +41,9 @@ class OtherConfigs(BaseModel):
         description="Whether adding context providing time to the thread.",
     )
 
-    tools: Optional[List[Any]] = Field(
+    tools: Optional[List[StandardToolCode | str]] = Field(
         default=None,
-        description="Tools available for the task.",
+        description="Tool codes to be enabled for the model. Must be pre-registered in the ToolRegistry.",
     )
 
     custom_api_key: Optional[str] = Field(

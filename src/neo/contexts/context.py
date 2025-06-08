@@ -21,7 +21,7 @@ class Context(BaseModel, IDMixin):
         default_factory=lambda x: Context.generate_id(),
         description="A unique identifier for the context.",
     )
-    provider_role: str | Role = Role.USER
+    provider_role: Role = Role.USER
     provider_name: Optional[str] = None
     provider_context_id: Optional[str] = (
         None  # track external system id like tool call id.

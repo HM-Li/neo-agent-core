@@ -5,9 +5,12 @@ from typing import Dict, List, Set
 
 from neo.agentic.instruction import ModelConfigs
 from neo.agentic.model_registry import ModelRegistry
-from neo.agentic.task import Task
+from neo.agentic.task import Task, TaskStatus
+from neo.agentic.tool_registry import ToolRegistry
 from neo.contexts import Thread
+from neo.types.contents import ToolOutputContent
 from neo.types.errors import TaskRuntimeError
+from neo.types.tool_codes import StandardToolCode
 from neo.utils.logger import get_logger
 
 
@@ -17,6 +20,8 @@ class Neo:
         self,
         tasks: List[Task] | Task = None,
         default_model_configs: ModelConfigs = None,
+        max_tool_execution_rounds: int = 5,
+        default_user_input: str = "continue",
     ) -> None:
         """
         A class to manage the execution of tasks in a directed acyclic graph (DAG).
@@ -31,8 +36,24 @@ class Neo:
             A list of Task objects or a single Task object to start with.
                 Any dependent tasks will be added automatically.
             If None, no tasks are added initially.
+
+        default_model_configs : ModelConfigs, optional
+            Default model configurations to use for tasks that don't specify their own.
+            If provided as a dict, it will be converted to a ModelConfigs instance.
+            If None, tasks must provide their own model configurations.
+
+        max_tool_execution_rounds : int, optional
+            Maximum number of tool execution rounds per task to prevent infinite loops.
+            Default is 5.
+
+        default_user_input : str, optional
+            Default user input to use if a task does not provide any.
+            This ensures the conversation can continue even without explicit input.
+            Default is "continue the conversation".
+            This is important to prevent empty responses from the model when the previous response was from another assistant.
         """
         self.model_registry = ModelRegistry()
+        self.tool_registry = ToolRegistry()
 
         if (
             not isinstance(default_model_configs, ModelConfigs)
@@ -41,6 +62,8 @@ class Neo:
             default_model_configs = ModelConfigs(**default_model_configs)
 
         self.default_model_configs = default_model_configs
+        self.max_tool_execution_rounds = max_tool_execution_rounds
+        self.default_user_input = default_user_input
 
         self.tasks: Dict[str, Task] = {}
         self.head_task_ids: Set[str] = set()
@@ -80,9 +103,8 @@ class Neo:
             f"Head tasks: {tuple(str(self.tasks[i]) for i in self.head_task_ids)}"
         )
 
-        for task_id in self.head_task_ids:
-            _visited = set()
-            self._build_graph(self.tasks[task_id], visited=_visited)
+        # Build the graph in a single optimized pass
+        self._build_graph()
 
         self.logger.info(f"End task: {self.tasks[self.end_task_id]}")
 
@@ -100,31 +122,168 @@ class Neo:
 
         return dependent_tasks
 
-    def _build_graph(self, task: Task, visited: set) -> None:
+    def _build_graph(self) -> None:
         """
-        Adds a new task node to the manager.
+        Optimized single-pass graph building that:
+        1. Calculates in-degrees efficiently
+        2. Validates structure and detects cycles
+        3. Finds end task
+        4. Validates tools only once per task
         """
+        processed = set()  # Tasks that have been fully processed
+
+        # Process each head task
+        for task_id in self.head_task_ids:
+            visited = set()  # Current path for cycle detection
+            self._process_task(self.tasks[task_id], visited, processed)
+
+    def _process_task(self, task: Task, visited: set, processed: set) -> None:
+        """Process a single task: validate, calculate in-degrees, detect cycles."""
+        # Cycle detection
         if task.id in visited:
             raise ValueError(
                 f"Cyclic dependency detected: Task {task} is already registered."
             )
+
         visited.add(task.id)
 
+        # Skip if already processed (shared task from another head)
+        if task.id in processed:
+            visited.remove(task.id)
+            return
+
+        processed.add(task.id)
         self.logger.info(f"Registering task {task}...")
 
-        # recursively add task and ensure no cyclic dependency
+        # Validate tools for this task (only once)
+        self._validate_task_tools(task)
+
+        # Process dependencies and calculate in-degrees
         if task.subsequent_tasks is not None:
             for dep in task.subsequent_tasks:
-                self.in_degree[dep.id] += 1
-                self._build_graph(dep, visited)
+                self.in_degree[dep.id] += 1  # Calculate in-degree as we go
+                self._process_task(dep, visited, processed)
         else:
-            # this is a leaf node
+            # Leaf node - set as end task
             if self.end_task_id is not None and self.end_task_id != task.id:
                 _task = self.tasks[self.end_task_id]
                 raise ValueError(
                     f"Graph must converge to a single leaf node. Found: {_task} and {task}"
                 )
             self.end_task_id = task.id
+
+        visited.remove(task.id)  # Backtrack
+
+    def create_model_for_task(self, task: Task):
+        """
+        Create a model instance configured for the given task.
+
+        This method handles:
+        - Model configuration resolution (task-specific vs default)
+        - System instruction setup
+        - Tool code resolution to actual tool instances
+        - Model instantiation with all configurations
+
+        Parameters
+        ----------
+        task : Task
+            The task for which to create a model
+
+        Returns
+        -------
+        Model instance configured for the task
+
+        Raises
+        ------
+        ValueError
+            If no model configs are provided for the task
+        """
+        # prepare model configs
+        model_configs = self.default_model_configs
+        system_instruction = None
+        kwargs = {}
+
+        instruction = task.instruction
+        if instruction is not None:
+            if instruction.model_configs is not None:
+                model_configs = instruction.model_configs
+
+            # get instruction content
+            if instruction.content is not None:
+                system_instruction = instruction.content
+
+            if instruction.other_configs is not None:
+                kwargs = instruction.other_configs.model_dump()
+
+                # replace tool codes with actual tool instances
+                if "tools" in kwargs and kwargs["tools"]:
+                    resolved_tools = []
+                    model_class = self.model_registry.get_model_registry(
+                        model_configs.model
+                    )["class"]
+
+                    for tool_item in kwargs["tools"]:
+                        if isinstance(tool_item, (str, StandardToolCode)):
+                            # It's a tool code, resolve it to actual tool
+                            try:
+                                tool = self.tool_registry.get_tool(
+                                    model_class, tool_item
+                                )
+                                resolved_tools.append(tool)
+                            except KeyError:
+                                self.logger.warning(
+                                    f"Tool '{tool_item}' not found for model class '{model_class.__name__}'. Skipping."
+                                )
+                        else:
+                            # It's already a tool instance or callable
+                            resolved_tools.append(tool_item)
+                    kwargs["tools"] = resolved_tools
+
+        if model_configs is None:
+            raise ValueError(f"No model configs provided for {task}.")
+
+        configs = model_configs.model_dump(exclude={"model"}, exclude_none=True)
+
+        return self.model_registry.create_model(
+            model=model_configs.model,
+            instruction=system_instruction,
+            configs=configs,
+            **kwargs,
+        )
+
+    def _validate_task_tools(self, task: Task) -> None:
+        """
+        Validates that all tools specified in task's other_configs exist in the tool registry
+        for the configured model.
+        """
+        if task.instruction is None or task.instruction.other_configs is None:
+            return
+
+        tools = task.instruction.other_configs.tools
+        if tools is None:
+            return
+
+        # Get model configs to determine model class
+        model_configs = task.instruction.model_configs or self.default_model_configs
+        if model_configs is None:
+            raise ValueError(
+                f"No model configs provided for task {task}. Cannot validate tools "
+                f"{tools} without knowing the target model."
+            )
+
+        entry = self.model_registry.get_model_registry(model_configs.model)
+        model_class = entry["class"]
+
+        # Validate each tool exists in registry
+        for tool_code in tools:
+            try:
+                self.tool_registry.get_tool(model_class, tool_code)
+            except KeyError as e:
+                raise ValueError(
+                    f"Tool '{tool_code}' specified in task {task} is not available "
+                    f"for model '{model_configs.model}' (class: {model_class.__name__}). "
+                    f"Available tools: {self.tool_registry.list_tools(model_class)}"
+                ) from e
 
     async def run_single_task(
         self, task: Task, thread: Thread, start_fresh: bool
@@ -133,53 +292,93 @@ class Neo:
         Executes a single task.
         """
         try:
+            # Set task status to running
+            task.status = TaskStatus.RUNNING
+            self.logger.info(f"Starting task execution: {task}")
             if start_fresh is False:
                 # use deliverable if available
                 if task.deliverable is not None:
                     await thread.extend_thread(task.deliverable)
+                    if task.status != TaskStatus.COMPLETED:
+                        task.status = TaskStatus.COMPLETED
                     self.logger.info(f"Task {task} already completed.")
                     return
 
+            # Create isolated thread fork for this task to prevent race conditions
             task.base_thread_snapshot = await thread.afork()
+            task_thread = await thread.afork()
 
-            # prepare model configs
-            model_configs = self.default_model_configs
-            system_instruction = None
-            kwargs = {}
+            model = self.create_model_for_task(task)
 
-            instruction = task.instruction
-            if instruction is not None:
-                if instruction.model_configs is not None:
-                    model_configs = instruction.model_configs
+            # run the task with model, handling tool execution rounds
+            round_count = 0
+            generated_thread = Thread()
 
-                # get instruction content
-                if instruction.content is not None:
-                    system_instruction = instruction.content
-                    
-                if instruction.other_configs is not None:
-                    kwargs = instruction.other_configs.model_dump()
+            while round_count < self.max_tool_execution_rounds:
+                round_count += 1
+                self.logger.debug(f"Task {task} round {round_count}")
 
-            if model_configs is None:
-                raise ValueError(f"No model configs provided for {task}. ")
+                # Use default_user_input if task.user_input is None to prevent empty responses
+                user_input_for_round = task.user_input if round_count == 1 else None
+                if user_input_for_round is None and round_count == 1:
+                    user_input_for_round = self.default_user_input
 
-            configs = model_configs.model_dump(exclude={"model"}, exclude_none=True)
+                output_thread = await model.acreate(
+                    user_input=user_input_for_round,
+                    base_thread=task_thread,
+                    return_generated_thread=True,
+                )
 
-            model = self.model_registry.create_model(
-                model=model_configs.model,
-                instruction=system_instruction,
-                configs=configs,
-                **kwargs,
-            )
+                # Check for empty response thread and error out
+                if len(output_thread) == 0:
+                    raise TaskRuntimeError(
+                        f"Task {task} received empty response from model in round {round_count}. "
+                        f"This may indicate the conversation ended with assistant message or model refused to respond."
+                    )
 
-            # run the task with model
-            output_thread = await model.acreate(
-                user_input=task.user_input,
-                base_thread=thread,
-                return_generated_thread=True,  # only track newly generated contents as deliverables
-            )
-            task.deliverable = output_thread
-            self.logger.info(f"Task {task} completed.")
+                # Check if the response thread has contexts with no contents
+                for context in output_thread:
+                    if not context.contents:
+                        raise TaskRuntimeError(
+                            f"Task {task} received context with no contents in round {round_count}. "
+                            f"This indicates an invalid response from the model."
+                        )
+
+                # Collect all generated contexts from this round
+                await generated_thread.extend_thread(output_thread)
+
+                # Check if the last context has tool output content
+                if len(output_thread) > 0:
+                    last_context = output_thread.get_context(-1)
+                    if last_context.contents and len(last_context.contents) > 0:
+                        last_content = last_context.contents[-1]
+                        if isinstance(last_content, ToolOutputContent):
+                            # Continue the conversation for tool execution
+                            await task_thread.extend_thread(output_thread)
+                            continue
+
+                # No tool output found, task completed
+                break
+            else:
+                # Maximum rounds reached - this is an error condition
+                raise TaskRuntimeError(
+                    f"Task {task} exceeded maximum tool execution rounds "
+                    f"({self.max_tool_execution_rounds}). This may indicate infinite tool loops."
+                )
+
+            # Create deliverable with all generated contexts from all rounds
+            task.deliverable = generated_thread
+
+            # Update shared thread for task handshaking
+            await thread.extend_thread(task.deliverable)
+
+            # Mark task as completed
+            task.status = TaskStatus.COMPLETED
+            self.logger.info(f"Task {task} completed in {round_count} rounds.")
         except Exception as e:
+            # Mark task as failed
+            task.status = TaskStatus.FAILED
+            self.logger.error(f"Task {task} failed with error: {str(e)}")
             raise TaskRuntimeError(f"Task {task} failed with error: {str(e)}") from e
 
     async def run_all(
@@ -198,7 +397,6 @@ class Neo:
         in_degree = copy.deepcopy(self.in_degree)
         ready = [self.tasks[task_id] for task_id in self.head_task_ids]
 
-        completed_tasks = set()
         if base_thread is None:
             base_thread = Thread()
 
@@ -218,21 +416,22 @@ class Neo:
                 try:
                     await asyncio.gather(*current_tasks)
                 except Exception as e:
-                    # Cancel all running tasks
-                    for task in current_tasks:
-                        if not task.done():
-                            task.cancel()
+                    # Cancel all running tasks and mark them as cancelled
+                    for i, asyncio_task in enumerate(current_tasks):
+                        if not asyncio_task.done():
+                            asyncio_task.cancel()
+                            # Mark the corresponding Task object as cancelled
+                            if i < len(ready):
+                                ready[i].status = TaskStatus.CANCELLED
                     # Wait for tasks to be cancelled
                     await asyncio.gather(*current_tasks, return_exceptions=True)
                     raise RuntimeError(
                         "Task execution failed. Cancelled all running tasks."
                     ) from e
 
-                # Mark tasks as completed and update dependent tasks' in-degrees.
+                # Update dependent tasks' in-degrees and prepare new ready tasks.
                 new_ready = []
                 for task in ready:
-                    completed_tasks.add(task.id)
-
                     # Update in-degree of dependent tasks and prepare new ready tasks.
                     if task.subsequent_tasks is not None:
                         for dep in task.subsequent_tasks:
@@ -243,9 +442,13 @@ class Neo:
                 ready = new_ready
 
             # Check for uncompleted tasks—this would indicate a cyclic dependency.
-            if len(completed_tasks) != len(self.tasks):
-                missing = set(self.tasks.keys()) - completed_tasks
-                raise ValueError(f"Tasks not completed: {missing}")
+            uncompleted_tasks = [
+                task_id
+                for task_id, task in self.tasks.items()
+                if task.status != TaskStatus.COMPLETED
+            ]
+            if uncompleted_tasks:
+                raise ValueError(f"Tasks not completed: {set(uncompleted_tasks)}")
 
             return base_thread
 
@@ -293,4 +496,61 @@ class Neo:
         return next(
             (task for task in self.tasks.values() if task.id.endswith(task_id)), None
         )
-        
+
+    def get_task_status_summary(self) -> dict:
+        """
+        Get a summary of task statuses.
+
+        Returns:
+            dict: A dictionary with status counts and task lists by status.
+        """
+        status_counts = {status.value: 0 for status in TaskStatus}
+        tasks_by_status = {status.value: [] for status in TaskStatus}
+
+        for task in self.tasks.values():
+            status_counts[task.status.value] += 1
+            tasks_by_status[task.status.value].append(task)
+
+        return {
+            "counts": status_counts,
+            "tasks": tasks_by_status,
+            "total_tasks": len(self.tasks),
+        }
+
+    def display_task_status(self) -> None:
+        """
+        Display a formatted overview of all task statuses.
+        """
+        summary = self.get_task_status_summary()
+
+        print("📊 Task Status Overview:")
+        print(f"   Total Tasks: {summary['total_tasks']}")
+        print()
+
+        status_emojis = {
+            TaskStatus.PENDING.value: "⏳",
+            TaskStatus.RUNNING.value: "🔄",
+            TaskStatus.COMPLETED.value: "✅",
+            TaskStatus.FAILED.value: "❌",
+            TaskStatus.CANCELLED.value: "🚫",
+        }
+
+        for status_value, count in summary["counts"].items():
+            if count > 0:
+                emoji = status_emojis.get(status_value, "❓")
+                print(f"   {emoji} {status_value.title()}: {count}")
+                for task in summary["tasks"][status_value]:
+                    print(f"      • {task}")
+                print()
+
+        if (
+            summary["counts"][TaskStatus.PENDING.value] == 0
+            and summary["counts"][TaskStatus.RUNNING.value] == 0
+        ):
+            if (
+                summary["counts"][TaskStatus.FAILED.value] > 0
+                or summary["counts"][TaskStatus.CANCELLED.value] > 0
+            ):
+                print("🚨 Execution completed with errors!")
+            else:
+                print("🎉 All tasks completed successfully!")

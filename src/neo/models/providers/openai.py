@@ -50,17 +50,28 @@ class OpenAICompleteModel(BaseChatModel):
             "type": "input_audio",
             "input_audio": {"data": "{data}", "format": "{format}"},
         },
+        "tool_input": {
+            "type": "function",
+            "id": "{call_id}",
+            "function": {
+                "name": "{tool_name}",
+                "arguments": "{input}",
+            },
+        },
     }
 
     @property
     def unsupported_params(self) -> List[str]:
-        return ["tools", "mcp_clients"]
+        return []
 
     def context_to_prompt(self, context, add_role: bool = True):
         """convert context to a user prompt message following the default api template"""
         prompt = []
+        tool_inputs = []
+        extra_message_body = {}
 
         for c in context.contents:
+            is_tool_input = False
             match c:
                 case TextContent():
                     t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
@@ -106,15 +117,52 @@ class OpenAICompleteModel(BaseChatModel):
 
                     t["input_audio"]["data"] = data
                     t["input_audio"]["format"] = mime
+
+                case ToolInputContent():
+                    t = copy.deepcopy(self.PROMPT_TEMPLATE["tool_input"])
+                    t["function"]["name"] = c.tool_name
+                    t["function"]["arguments"] = json.dumps(c.params)
+                    t["id"] = c.tool_use_id
+                    is_tool_input = True  # OpenAI completion API treats tool inputs differently from other content types
+
+                case ToolOutputContent():
+                    extra_message_body["tool_call_id"] = c.tool_use_id
+
+                    # OpenAI only supports one string output per tool call
+                    if len(c.contents) != 1:
+                        raise ValueError(
+                            "OpenAI only supports one output per tool call for the output."
+                        )
+
+                    output = c.contents[0]
+                    if output is not None:
+                        output = output.data
+
+                    # OpenAI expects the output to be a string
+                    t = str(output)
+
                 case _:
                     t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
                     t["text"] = str(c)
-            prompt.append(t)
+
+            if is_tool_input:
+                tool_inputs.append(t)
+            else:
+                prompt.append(t)
+
+        if len(prompt) == 1 and isinstance(prompt[0], str):
+            # if only one content, return it directly
+            prompt = prompt[0]
 
         # post processing
-        if add_role:
+        if add_role or tool_inputs or extra_message_body:
             prompt = {"role": context.provider_role.value, "content": prompt}
 
+            if tool_inputs:
+                prompt["tool_calls"] = tool_inputs
+
+            if extra_message_body:
+                prompt.update(extra_message_body)
         return prompt
 
     def create_client(self):
@@ -124,6 +172,35 @@ class OpenAICompleteModel(BaseChatModel):
     def get_base_url(self) -> str:
         return "https://api.openai.com/v1"
 
+    @classmethod
+    def tool_to_json_schema(cls, tool: BaseTool | Callable) -> dict:
+        """Convert a tool to a json schema"""
+        if callable(tool):
+            tool = Tool(func=tool)
+
+        if not isinstance(tool, BaseTool):
+            raise ToolError(
+                f"The provided tool is not a callable or a BaseTool instance: {tool}"
+            )
+
+        if cls.is_internal_tool(tool):
+            tool_schema = tool.model_dump(exclude_none=True)
+        else:
+            tool_schema = {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.params,
+                    "strict": True,
+                },
+            }
+
+            # OpenAI requires 'additionalProperties': False
+            tool_schema["function"]["parameters"]["additionalProperties"] = False
+
+        return tool_schema
+
     async def prepare_config(
         self, user_input: str | Context | Thread, base_thread: Thread
     ) -> tuple:
@@ -132,14 +209,17 @@ class OpenAICompleteModel(BaseChatModel):
         config = copy.deepcopy(self.configs)
 
         # add system message atomically
-        temp_thread = await thread.afork()
+        if base_thread is None:
+            base_thread = Thread()
+
+        temp_thread = await base_thread.afork()
         instruction = self.get_augmented_instruction()
 
         if instruction is not None:
             system_msg = Context(contents=instruction, provider_role=Role.DEVELOPER)
             await temp_thread.add_context_to_beginning(system_msg)
 
-        messages = await self.thread_to_prompt(temp_thread, base_thread=base_thread)
+        messages = await self.thread_to_prompt(thread=thread, base_thread=temp_thread)
 
         if self.json_mode:
             config["response_format"] = {"type": "json_object"}
@@ -152,6 +232,23 @@ class OpenAICompleteModel(BaseChatModel):
         if "max_tokens" in config:
             config["max_completion_tokens"] = config.pop("max_tokens")
 
+        # add tools
+        tools = []
+        if self.tools is not None:
+            for tool in self.tools:
+                tool_schema = self.register_tool(tool)
+                tools.append(tool_schema)
+
+        # add mcp clients
+        if self.mcp_clients is not None:
+            for client in self.mcp_clients:
+                client_tool_schemas = await self.bind_mcp_client(client)
+                tools.extend(client_tool_schemas)
+
+        if len(tools) > 0:
+            config["tools"] = tools
+            config["tool_choice"] = self.tool_choice
+
         # add default seed
         config["seed"] = 2378
         return messages, config, thread
@@ -162,23 +259,64 @@ class OpenAICompleteModel(BaseChatModel):
         if getattr(msg, "refusal", None):
             raise ModelServiceError(msg.refusal)
 
-        if getattr(msg, "parsed", None):
-            result_text = msg.parsed
-        else:
-            result_text = msg.content
+        contexts = []
+        # Handle text content
+        if msg.content:
+            if getattr(msg, "parsed", None):
+                result_text = msg.parsed
+            else:
+                result_text = msg.content
 
-        if not isinstance(result_text, str):
-            result_text = str(result_text)
+            if not isinstance(result_text, str):
+                result_text = str(result_text)
 
-        output_context = Context(
-            contents=TextContent(data=result_text),
-            provider_role=Role.ASSISTANT,
-            provider_name=self.model,
-            provider_context_id=response.id,
-        )
+            output_context = Context(
+                contents=TextContent(data=result_text),
+                provider_role=Role.ASSISTANT,
+                provider_name=self.model,
+                provider_context_id=response.id,
+            )
+            contexts.append(output_context)
+
+        # Handle tool calls first
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            # For openai completion API, tool calls are considered as one context/ message and tool outputs are separate contexts.
+            tool_call_context = Context(
+                contents=[],
+                provider_role=Role.ASSISTANT,
+                provider_name=self.model,
+                provider_context_id=response.id,
+            )
+            tool_output_contexts = []
+
+            for tool_call in msg.tool_calls:
+                # Create tool input context
+                tool_input_content = ToolInputContent(
+                    tool_name=tool_call.function.name,
+                    tool_use_id=tool_call.id,
+                    params=json.loads(tool_call.function.arguments),
+                )
+                tool_call_context.contents.append(tool_input_content)
+
+                # Execute tool and create tool output context
+                tool_output_content = await self.handle_single_tool_response(
+                    content=tool_input_content
+                )
+                tool_output_contexts.append(
+                    Context(
+                        contents=tool_output_content,
+                        provider_role=Role.TOOL,
+                        provider_name=None,
+                        provider_context_id=response.id,
+                    )
+                )
+            # Add tool call context and tool output contexts to the main contexts
+            contexts.append(tool_call_context)
+            contexts.extend(tool_output_contexts)
 
         # add response to thread
-        await thread.append_context(output_context)
+        if contexts:
+            await thread.append_contexts(contexts)
 
     async def acreate(
         self,
@@ -187,58 +325,64 @@ class OpenAICompleteModel(BaseChatModel):
         return_response_object: bool = False,
         return_generated_thread: bool = False,
     ) -> Thread:
-        messages, config, thread = await self.prepare_config(
-            user_input=user_input, base_thread=base_thread
-        )
-
-        self.logger.info(
-            f"Sending Model API Request to ({self.get_base_url()}) with Configs: {config}"
-        )
-
-        # Use parse API if structured/boolean response is requested.
-        parse_api = self.boolean_response or self.structured_response_model is not None
-
         try:
-            if not parse_api:
-                response = await self.client.chat.completions.create(
-                    messages=messages, **config
-                )
+            messages, config, thread = await self.prepare_config(
+                user_input=user_input, base_thread=base_thread
+            )
+
+            self.logger.info(
+                f"Sending Model API Request to ({self.get_base_url()}) with Configs: {config}"
+            )
+
+            # Use parse API if structured/boolean response is requested.
+            parse_api = (
+                self.boolean_response or self.structured_response_model is not None
+            )
+
+            try:
+                if not parse_api:
+                    response = await self.client.chat.completions.create(
+                        messages=messages, **config
+                    )
+                else:
+                    response = await self.client.beta.chat.completions.parse(
+                        messages=messages, **config
+                    )
+            except openai.BadRequestError as e:
+                err_msg = str(e)
+                if (
+                    "context_length_exceeded" in err_msg
+                    or "string_above_max_length" in err_msg
+                ):
+                    raise ContextLengthExceededError(e) from e
+
+                raise ModelServiceError(e) from e
+            except Exception as e:
+                raise ModelServiceError(e) from e
+
+            self.logger.info(
+                f"Model API Request Completed. Usage: {getattr(response, 'usage', {})}"
+            )
+
+            if return_response_object:
+                return response
+
+            # add response to thread
+            await self.add_response_to_thread(thread, response)
+
+            # extend the base thread
+            if base_thread is not None:
+                await base_thread.extend_thread(thread=thread)
             else:
-                response = await self.client.beta.chat.completions.parse(
-                    messages=messages, **config
-                )
-        except openai.BadRequestError as e:
-            err_msg = str(e)
-            if (
-                "context_length_exceeded" in err_msg
-                or "string_above_max_length" in err_msg
-            ):
-                raise ContextLengthExceededError(e) from e
+                base_thread = thread
 
-            raise ModelServiceError(e) from e
-        except Exception as e:
-            raise ModelServiceError(e) from e
+            if return_generated_thread is True:
+                return thread
 
-        self.logger.info(
-            f"Model API Request Completed. Usage: {getattr(response, 'usage', {})}"
-        )
-
-        if return_response_object:
-            return response
-
-        # add response to thread
-        await self.add_response_to_thread(thread, response)
-
-        # extend the base thread
-        if base_thread is not None:
-            await base_thread.extend_thread(thread=thread)
-        else:
-            base_thread = thread
-
-        if return_generated_thread is True:
-            return thread
-
-        return base_thread
+            return base_thread
+        finally:
+            # clear tool registry
+            await self.aclear_registries()
 
 
 class OpenAIResponseModel(BaseChatModel):
@@ -474,8 +618,11 @@ class OpenAIResponseModel(BaseChatModel):
             )
 
         if cls.is_internal_tool(tool):
+            # For internal tools like WebSearch, return the tool's direct schema
+            # This will be something like {"type": "web_search_preview", "user_location": {...}, ...}
             tool_schema = tool.model_dump(exclude_none=True)
         else:
+            # For regular function tools, wrap in OpenAI function schema
             tool_schema = {
                 "type": "function",
                 "name": tool.name,
@@ -610,7 +757,7 @@ class OpenAIResponseModel(BaseChatModel):
             elif item.type == "reasoning":
                 # Handle reasoning (thinking) blocks from OpenAI
                 for summary in item.summary:
-                    self.logger.info(f"Reasoning: {summary.text}")
+                    self.logger.thinking(summary.text)
         # add response to thread
         await thread.append_contexts(contexts)
 

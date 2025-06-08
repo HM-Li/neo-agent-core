@@ -162,3 +162,25 @@ class CustomLogger(logging.Logger):
                 if args:
                     msg = msg % args
                 self._send_webhook_message("ERROR", msg)
+
+    def server_tool(self, tool_name: str, tool_data: dict, *args, **kwargs):
+        """Log server tool usage (like web search results) with structured format"""
+        if self.isEnabledFor(logging.INFO):
+            formatted_msg = f"Server Tool '{tool_name}' executed: {tool_data}"
+            super().info(formatted_msg, *args, **kwargs)
+
+            if self.send_webhook:
+                # Format for webhook with better structure
+                webhook_msg = f"🔍 Server Tool: {tool_name}\n```json\n{tool_data}\n```"
+                self._send_webhook_message("SERVER_TOOL", webhook_msg)
+
+    def thinking(self, thinking_content: str, *args, **kwargs):
+        """Log model thinking/reasoning content with special formatting"""
+        if self.isEnabledFor(logging.INFO):
+            formatted_msg = f"Model Thinking: {thinking_content}"
+            super().info(formatted_msg, *args, **kwargs)
+
+            if self.send_webhook:
+                # Format for webhook with special thinking emoji and formatting
+                webhook_msg = f"🧠 Model Thinking:\n```\n{thinking_content}\n```"
+                self._send_webhook_message("THINKING", webhook_msg)

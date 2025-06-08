@@ -141,3 +141,5 @@ gmail_token.json
 .pensieve
 
 .venv
+.claude
+CLAUDE.local.md

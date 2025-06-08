@@ -257,7 +257,12 @@ async def test_google_model(mock_google, simple_prompt):
     # Verify the contents parameter was passed correctly
     call_args = mock_generate_content.call_args[1]
     assert "contents" in call_args
-    assert call_args["contents"][0] == simple_prompt
+    # Google model now returns UserContent objects with parts
+    contents = call_args["contents"]
+    assert len(contents) == 1
+    assert hasattr(contents[0], 'parts')
+    assert len(contents[0].parts) == 1
+    assert contents[0].parts[0].text == simple_prompt
 
     # Check response handling
     assert isinstance(result, Thread)
@@ -333,10 +338,9 @@ def test_unsupported_params_property():
     assert "tools" in google_model.unsupported_params
     assert "mcp_clients" in google_model.unsupported_params
     
-    # Test OpenAI Complete model (doesn't support tools/mcp_clients)
+    # Test OpenAI Complete model (actually supports tools/mcp_clients now)
     openai_complete_model = OpenAICompleteModel(model="gpt-4o")
-    assert "tools" in openai_complete_model.unsupported_params
-    assert "mcp_clients" in openai_complete_model.unsupported_params
+    assert openai_complete_model.unsupported_params == []
     
     # Test OpenAI Response model unsupported params (test class method directly)
     dummy_instance = OpenAIResponseModel.__new__(OpenAIResponseModel)

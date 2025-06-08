@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from neo.contexts.context import Context
 from neo.contexts.thread import Thread
 from neo.models.providers.base import BaseChatModel
-from neo.tools import Tool
+from neo.tools import BaseTool, Tool
 from neo.types.contents import (
     AudioTextContent,
     BooleanContent,
@@ -95,6 +95,13 @@ class AnthropicModel(BaseChatModel):
         # Anthropic's client manages endpoints internally.
         return "https://api.anthropic.com/v1"
 
+    def _create_text_prompt(self, text_data: str) -> dict:
+        """Create a text prompt with trailing whitespace stripped to avoid Anthropic API errors."""
+        t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
+        # Strip trailing whitespace to avoid Anthropic API error
+        t["text"] = text_data.rstrip() if isinstance(text_data, str) else text_data
+        return t
+
     async def context_to_prompt(
         self, context: Context | List, add_role: bool = True
     ) -> dict:
@@ -105,8 +112,7 @@ class AnthropicModel(BaseChatModel):
 
             match c:
                 case TextContent():
-                    t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
-                    t["text"] = c.data
+                    t = self._create_text_prompt(c.data)
 
                 case ImageContent():
                     if isinstance(c.data, bytes):
@@ -163,8 +169,7 @@ class AnthropicModel(BaseChatModel):
                             text_data = base64_str_to_binary(data=data).decode("utf-8")
                         c.text = text_data
 
-                    t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
-                    t["text"] = text_data
+                    t = self._create_text_prompt(text_data)
 
                 case AudioTextContent():
                     if c.text is not None:
@@ -182,15 +187,13 @@ class AnthropicModel(BaseChatModel):
                             )
                         text_data = text_data.data
                         c.text = text_data
-                    t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
-                    t["text"] = text_data
+                    t = self._create_text_prompt(text_data)
 
                 case RawContent():
                     t = c.data
 
                 case _:
-                    t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
-                    t["text"] = str(c)
+                    t = self._create_text_prompt(str(c))
 
             prompt.append(t)
 
@@ -276,8 +279,8 @@ class AnthropicModel(BaseChatModel):
         schema = {"name": title, "description": "", "input_schema": input_schema}
         return schema
 
-    @staticmethod
-    def tool_to_json_schema(tool: Tool | Callable) -> dict:
+    @classmethod
+    def tool_to_json_schema(cls, tool: Tool | Callable) -> dict:
         """
         Convert a Tool object to a JSON schema format that can be used by Anthropic.
         """
@@ -285,19 +288,22 @@ class AnthropicModel(BaseChatModel):
             # If it's a callable, wrap it in a Tool object
             tool = Tool(func=tool)
 
-        if not isinstance(tool, Tool):
+        if not isinstance(tool, BaseTool):
             raise ToolError(
                 f"The provided tool is not a callable or a Tool instance: {tool}"
             )
 
-        input_schema = tool.params
+        if cls.is_internal_tool(tool):
+            schema = tool.model_dump(exclude_none=True)
+        else:
+            input_schema = tool.params
 
-        # Create a schema dictionary
-        schema = {
-            "name": tool.name,
-            "description": tool.description if tool.description else "",
-            "input_schema": input_schema,
-        }
+            # Create a schema dictionary
+            schema = {
+                "name": tool.name,
+                "description": tool.description if tool.description else "",
+                "input_schema": input_schema,
+            }
 
         return schema
 
@@ -316,7 +322,30 @@ class AnthropicModel(BaseChatModel):
             elif item.type == "thinking":
                 # Handle thinking content from Anthropic
                 thinking_text = getattr(item, "thinking", None)
-                self.logger.info(f"Thinking: {thinking_text}")
+                self.logger.thinking(thinking_text)
+
+            elif item.type == "server_tool_use":
+                # Handle server tool use - log the tool invocation
+                tool_name = getattr(item, "name", "unknown_server_tool")
+                tool_input = getattr(item, "input", {})
+                tool_use_id = getattr(item, "id", "")
+                tool_data = {
+                    "type": "server_tool_use",
+                    "tool_use_id": tool_use_id,
+                    "input": tool_input,
+                }
+                self.logger.server_tool(tool_name, tool_data)
+
+            elif item.type == "web_search_tool_result":
+                # Handle web search tool results - log instead of treating as content
+                tool_use_id = getattr(item, "tool_use_id", "")
+                search_content = getattr(item, "content", [])
+                tool_data = {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": tool_use_id,
+                    "results": search_content,
+                }
+                self.logger.server_tool("web_search", tool_data)
 
             elif item.type == "tool_use":
                 # handle structured response differently
@@ -374,6 +403,7 @@ class AnthropicModel(BaseChatModel):
                 user_input,
                 base_thread=base_thread,
             )
+            print(messages)
 
             self.logger.info(f"Sending Claude API Request with Configs: {configs}")
 

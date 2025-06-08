@@ -89,8 +89,8 @@ class BaseChatModel(ABC):
         mcp_clients: Optional[List[MCPClient]] = None,
         tool_choice: Literal["auto", "required"] = "auto",
         timeaware: bool = False,
-        enable_thinking: bool = False,
-        thinking_budget_tokens: int = 1024,
+        enable_thinking: bool = None,
+        thinking_budget_tokens: int = None,
     ):
         if (
             sum(
@@ -124,7 +124,9 @@ class BaseChatModel(ABC):
         self.tool_choice = tool_choice
         self.timeaware = timeaware
         self.enable_thinking = enable_thinking
-        self.thinking_budget_tokens = thinking_budget_tokens
+
+        if self.enable_thinking is not None:
+            self.thinking_budget_tokens = thinking_budget_tokens or 1024
 
         self._logger = None
         self.client = self.create_client()
@@ -147,7 +149,7 @@ class BaseChatModel(ABC):
         Check if the parameters are supported using the unsupported_params property.
         """
         for param in self.unsupported_params:
-            if getattr(self, param) is not None:
+            if hasattr(self, param) and getattr(self, param) is not None:
                 raise ValueError(
                     f"{self.__class__.__name__} does not support `{param}` parameter. Please remove it."
                 )
@@ -420,11 +422,17 @@ class BaseChatModel(ABC):
 
     def register_tool(self, tool: Tool | Callable):
         """Register a tool with the model."""
-        tool_schema = self.tool_to_json_schema(tool)
+        # Handle internal tool classes by instantiating them
         if self.is_internal_tool(tool):
+            if not isinstance(tool, BaseTool):
+                # It's a class, instantiate it
+                tool = tool()
+            tool_schema = self.tool_to_json_schema(tool)
             self.logger.info(f"Registered tool '{tool.name}' to the registry. ")
             return tool_schema
 
+        tool_schema = self.tool_to_json_schema(tool)
+        
         if not isinstance(tool, Tool):
             tool = Tool(func=tool)
 
@@ -464,7 +472,7 @@ class BaseChatModel(ABC):
         """
         Check if the tool is an internal tool provided by this model.
         """
-        if callable(tool):
+        if callable(tool) and not hasattr(tool, 'provider'):
             return False
 
         # If the tool is a BaseTool instance, check its provider
@@ -472,10 +480,12 @@ class BaseChatModel(ABC):
             # Check if the provider of the tool is the same as the class name
             return tool.provider == cls.__name__
 
-        raise ValueError(
-            "The provided tool is neither a callable function nor a BaseTool instance. "
-            "Please provide a valid tool."
-        )
+        # If the tool is a class (type), check if it's a subclass of BaseTool and has the right provider
+        if isinstance(tool, type) and issubclass(tool, BaseTool):
+            # Check if the provider of the tool class is the same as the class name
+            return hasattr(tool, 'provider') and tool.provider == cls.__name__
+
+        return False
 
     @staticmethod
     def is_mcp_tool(tool: BaseTool | Callable) -> bool:
