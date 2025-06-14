@@ -403,7 +403,6 @@ class AnthropicModel(BaseChatModel):
                 user_input,
                 base_thread=base_thread,
             )
-            print(messages)
 
             self.logger.info(f"Sending Claude API Request with Configs: {configs}")
 
