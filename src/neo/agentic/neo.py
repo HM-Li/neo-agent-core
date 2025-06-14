@@ -7,9 +7,10 @@ from neo.agentic.instruction import ModelConfigs
 from neo.agentic.model_registry import ModelRegistry
 from neo.agentic.task import Task, TaskStatus
 from neo.agentic.tool_registry import ToolRegistry
-from neo.contexts import Thread
+from neo.contexts import Context, Thread
 from neo.types.contents import ToolOutputContent
 from neo.types.errors import TaskRuntimeError
+from neo.types.roles import Role
 from neo.types.tool_codes import StandardToolCode
 from neo.utils.logger import get_logger
 
@@ -67,7 +68,7 @@ class Neo:
 
         self.tasks: Dict[str, Task] = {}
         self.head_task_ids: Set[str] = set()
-        self.end_task_id: str = None
+        self.end_task_ids: Set[str] = set()
         self.in_degree: Dict[str, int] = defaultdict(int)
         self.logger = get_logger(__name__)
 
@@ -106,50 +107,57 @@ class Neo:
         # Build the graph in a single optimized pass
         self._build_graph()
 
-        self.logger.info(f"End task: {self.tasks[self.end_task_id]}")
+        end_tasks = [str(self.tasks[task_id]) for task_id in self.end_task_ids]
+        self.logger.info(f"End tasks: {', '.join(end_tasks)}")
+        
+        # Warn if graph doesn't converge to single task
+        if len(self.end_task_ids) > 1:
+            self.logger.warning(f"Task graph has {len(self.end_task_ids)} end tasks and does not converge to a single task. Consider reviewing task dependencies.")
 
-    def _register_and_fetch_dependents(self, task: Task) -> Set[str]:
-        """recursively get all dependent tasks"""
+    def _register_and_fetch_dependents(self, task: Task, visited: Set[str] = None) -> Set[str]:
+        """recursively get all dependent tasks with cycle detection"""
+        if visited is None:
+            visited = set()
+            
+        # Cycle detection
+        if task.id in visited:
+            raise ValueError(
+                f"Cyclic dependency detected: Task {task} forms a cycle in the task graph."
+            )
+        
+        visited.add(task.id)
         self.tasks[task.id] = task
 
         if task.subsequent_tasks is None:
+            visited.remove(task.id)  # Backtrack
             return set()
 
         dependent_tasks = set()
         for dep in task.subsequent_tasks:
             dependent_tasks.add(dep.id)
-            dependent_tasks.update(self._register_and_fetch_dependents(dep))
+            dependent_tasks.update(self._register_and_fetch_dependents(dep, visited))
 
+        visited.remove(task.id)  # Backtrack
         return dependent_tasks
 
     def _build_graph(self) -> None:
         """
         Optimized single-pass graph building that:
         1. Calculates in-degrees efficiently
-        2. Validates structure and detects cycles
-        3. Finds end task
+        2. Validates structure
+        3. Finds end tasks
         4. Validates tools only once per task
         """
         processed = set()  # Tasks that have been fully processed
 
         # Process each head task
         for task_id in self.head_task_ids:
-            visited = set()  # Current path for cycle detection
-            self._process_task(self.tasks[task_id], visited, processed)
+            self._process_task(self.tasks[task_id], processed)
 
-    def _process_task(self, task: Task, visited: set, processed: set) -> None:
-        """Process a single task: validate, calculate in-degrees, detect cycles."""
-        # Cycle detection
-        if task.id in visited:
-            raise ValueError(
-                f"Cyclic dependency detected: Task {task} is already registered."
-            )
-
-        visited.add(task.id)
-
+    def _process_task(self, task: Task, processed: set) -> None:
+        """Process a single task: validate, calculate in-degrees."""
         # Skip if already processed (shared task from another head)
         if task.id in processed:
-            visited.remove(task.id)
             return
 
         processed.add(task.id)
@@ -162,17 +170,10 @@ class Neo:
         if task.subsequent_tasks is not None:
             for dep in task.subsequent_tasks:
                 self.in_degree[dep.id] += 1  # Calculate in-degree as we go
-                self._process_task(dep, visited, processed)
+                self._process_task(dep, processed)
         else:
-            # Leaf node - set as end task
-            if self.end_task_id is not None and self.end_task_id != task.id:
-                _task = self.tasks[self.end_task_id]
-                raise ValueError(
-                    f"Graph must converge to a single leaf node. Found: {_task} and {task}"
-                )
-            self.end_task_id = task.id
-
-        visited.remove(task.id)  # Backtrack
+            # Leaf node - add as end task
+            self.end_task_ids.add(task.id)
 
     def create_model_for_task(self, task: Task):
         """
@@ -314,13 +315,23 @@ class Neo:
             round_count = 0
             generated_thread = Thread()
 
+            last_context_is_user = False
+            if len(task_thread) > 0:
+                last_context_is_user = (
+                    task_thread.get_context(-1).provider_role == Role.USER
+                )
+
             while round_count < self.max_tool_execution_rounds:
                 round_count += 1
                 self.logger.debug(f"Task {task} round {round_count}")
 
                 # Use default_user_input if task.user_input is None to prevent empty responses
                 user_input_for_round = task.user_input if round_count == 1 else None
-                if user_input_for_round is None and round_count == 1:
+                if (
+                    user_input_for_round is None
+                    and round_count == 1
+                    and not last_context_is_user
+                ):
                     user_input_for_round = self.default_user_input
 
                 output_thread = await model.acreate(
@@ -382,7 +393,10 @@ class Neo:
             raise TaskRuntimeError(f"Task {task} failed with error: {str(e)}") from e
 
     async def run_all(
-        self, start_fresh: bool = False, base_thread: Thread = None
+        self,
+        start_fresh: bool = False,
+        base_thread: Thread = None,
+        initial_user_input: str | Context = None,
     ) -> Thread:
         """
         Executes all registered tasks following their dependency order in the graph.
@@ -393,12 +407,20 @@ class Neo:
         Raises:
             ValueError: If a dependency is declared for a task that has not been added, or if a cycle is detected.
         """
+        if base_thread is not None and initial_user_input is not None:
+            raise ValueError(
+                "Cannot provide both base_thread and initial_user_input. "
+                "Use one or the other."
+            )
 
         in_degree = copy.deepcopy(self.in_degree)
         ready = [self.tasks[task_id] for task_id in self.head_task_ids]
 
         if base_thread is None:
-            base_thread = Thread()
+            if initial_user_input is not None:
+                base_thread = Thread(contexts=[initial_user_input])
+            else:
+                base_thread = Thread()
 
         try:
             # Process tasks in topological order.

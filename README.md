@@ -34,6 +34,7 @@ uv sync --all-extras
 - XAI: `XAI_API_KEY`
 - Google: `GEMINI_API_KEY`
 - Anthropic: `ANTHROPIC_API_KEY`
+- Mistral AI: `MISTRAL_API_KEY`
 
 ### Logging
 Configure webhook logging:

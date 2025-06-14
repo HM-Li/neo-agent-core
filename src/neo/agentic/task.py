@@ -120,7 +120,7 @@ class Task(IDMixin, BaseModel):
         def get_truncated_string(s: Optional[str], max_len: int = 20) -> str:
             if not s:
                 return "N/A"
-            s = str(s).strip()
+            s = repr(str(s))
             if len(s) > max_len:
                 return s[: max_len - 3] + "..."
             return s

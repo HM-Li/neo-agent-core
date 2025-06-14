@@ -1,14 +1,19 @@
-from typing import Any, List, Optional
+from typing import List, Optional
 
+import httpx
 from pydantic import BaseModel, Field, field_validator
 
 from neo.types.tool_codes import StandardToolCode
 
 
-class ModelConfigs(BaseModel, extra="allow"):
+class ModelConfigs(BaseModel):
     """
     The ModelConfigs class encapsulates model configurations.
+
+    If None, the field will not be included in the model provider API request and thus the default behavior.
     """
+
+    model_config = {"extra": "allow", "arbitrary_types_allowed": True}
 
     model: str = Field(
         ...,
@@ -30,8 +35,21 @@ class ModelConfigs(BaseModel, extra="allow"):
         description="The top-p sampling parameter for the model's response.",
     )
 
+    timeout: Optional[float | httpx.Timeout] = Field(
+        default=600,
+        description="The timeout (seconds) configuration for the model's requests.",
+    )
 
-class OtherConfigs(BaseModel):
+    @field_validator("timeout", mode="before")
+    @classmethod
+    def _validate_timeout(cls, v):
+        # Convert explicit None to httpx.Timeout(None)
+        if v is None:
+            return httpx.Timeout(None)
+        return v
+
+
+class OtherConfigs(BaseModel, extra="allow"):
     """
     The OtherConfigs class encapsulates other configurations that aren't related to the GenAI model.
     """

@@ -2,6 +2,7 @@ import copy
 import os
 from typing import Any, List, Union
 
+import httpx
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -167,6 +168,26 @@ class GoogleAIModel(BaseChatModel):
 
         instruction = self.get_augmented_instruction()
 
+        # Handle timeout configuration
+        http_options = None
+        timeout = configs_copy.pop("timeout", None)
+        if timeout is not None:
+            timeout_ms = None
+            if isinstance(timeout, (int, float)):
+                # Convert seconds to milliseconds
+                timeout_ms = int(timeout * 1000)
+            elif isinstance(timeout, httpx.Timeout):
+                # Handle httpx.Timeout object - use read timeout as primary
+                if timeout.read is None:
+                    # httpx.Timeout(None) means infinite wait - set no timeout
+                    timeout_ms = 0  # 0 means no timeout in Google's API
+                else:
+                    timeout_ms = int(timeout.read * 1000)
+            
+            # Create HttpOptions with the timeout value
+            if timeout_ms is not None:
+                http_options = types.HttpOptions(timeout=timeout_ms)
+
         gen_config_args = {
             "temperature": configs_copy.pop("temperature", None),
             "max_output_tokens": configs_copy.pop("max_tokens", None),
@@ -174,6 +195,9 @@ class GoogleAIModel(BaseChatModel):
             "response_schema": response_schema,
             **configs_copy,  # Add remaining configs
         }
+
+        if http_options is not None:
+            gen_config_args["http_options"] = http_options
 
         # Add thinking configuration if enabled
         if self.enable_thinking:

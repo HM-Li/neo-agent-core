@@ -1,5 +1,6 @@
 # %%
 import copy
+import json
 from typing import Any, Callable, List, Optional
 
 import anthropic
@@ -357,7 +358,7 @@ class AnthropicModel(BaseChatModel):
                     params = item.input
                     # check params
                     self.structured_response_model(**params)
-                    content = TextContent(data=str(params))
+                    content = TextContent(data=json.dumps(params))
                     contents.append(content)
                 else:
                     tool_input = ToolInputContent(

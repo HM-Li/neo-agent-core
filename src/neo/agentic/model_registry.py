@@ -206,6 +206,11 @@ models = [
         [Modality.TEXT, Modality.AUDIO],
     ),
     (
+        "o3-pro",
+        OpenAIResponseModel,
+        [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
+    ),
+    (
         "o3",
         OpenAIResponseModel,
         [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],

@@ -249,8 +249,6 @@ class OpenAICompleteModel(BaseChatModel):
             config["tools"] = tools
             config["tool_choice"] = self.tool_choice
 
-        # add default seed
-        config["seed"] = 2378
         return messages, config, thread
 
     async def add_response_to_thread(self, thread: Thread, response: Any) -> Thread:
@@ -693,8 +691,8 @@ class OpenAIResponseModel(BaseChatModel):
         response: Any,
     ) -> Thread:
         # one response might contain multiple tool calls or messages
+        contexts = []
         for item in response.output:
-            contexts = []
             if item.type == "message":
                 contents = []
                 # one message might contain multiple content types
