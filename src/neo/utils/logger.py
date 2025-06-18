@@ -139,7 +139,7 @@ class CustomLogger(logging.Logger):
 
     def debug(self, msg, *args, **kwargs):
         if self.isEnabledFor(logging.DEBUG):
-            super().info(msg, *args, **kwargs)
+            super().debug(msg, *args, **kwargs)
 
             if self.send_webhook:
                 if args:
@@ -148,7 +148,7 @@ class CustomLogger(logging.Logger):
 
     def warning(self, msg, *args, **kwargs):
         if self.isEnabledFor(logging.WARNING):
-            super().info(msg, *args, **kwargs)
+            super().warning(msg, *args, **kwargs)
 
             if self.send_webhook:
                 if args:
@@ -157,7 +157,7 @@ class CustomLogger(logging.Logger):
 
     def error(self, msg, *args, **kwargs):
         if self.isEnabledFor(logging.ERROR):
-            super().info(msg, *args, **kwargs)
+            super().error(msg, *args, **kwargs)
 
             if self.send_webhook:
                 if args:

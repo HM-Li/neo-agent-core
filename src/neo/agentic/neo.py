@@ -23,6 +23,7 @@ class Neo:
         default_model_configs: ModelConfigs = None,
         max_tool_execution_rounds: int = 5,
         default_user_input: str = "continue",
+        model_registry_fuzzy_mode: bool = False,
     ) -> None:
         """
         A class to manage the execution of tasks in a directed acyclic graph (DAG).
@@ -52,6 +53,10 @@ class Neo:
             This ensures the conversation can continue even without explicit input.
             Default is "continue the conversation".
             This is important to prevent empty responses from the model when the previous response was from another assistant.
+
+        model_registry_fuzzy_mode : bool, optional
+            If True, the model registry will use fuzzy matching to find models.
+            This is useful when you want to allow different versions or slight variations of model names. e.g. gpt-3.5-turbo vs gpt-3.5-turbo-0301.
         """
         self.model_registry = ModelRegistry()
         self.tool_registry = ToolRegistry()
@@ -65,6 +70,7 @@ class Neo:
         self.default_model_configs = default_model_configs
         self.max_tool_execution_rounds = max_tool_execution_rounds
         self.default_user_input = default_user_input
+        self.model_registry_fuzzy_mode = model_registry_fuzzy_mode
 
         self.tasks: Dict[str, Task] = {}
         self.head_task_ids: Set[str] = set()
@@ -109,22 +115,26 @@ class Neo:
 
         end_tasks = [str(self.tasks[task_id]) for task_id in self.end_task_ids]
         self.logger.info(f"End tasks: {', '.join(end_tasks)}")
-        
+
         # Warn if graph doesn't converge to single task
         if len(self.end_task_ids) > 1:
-            self.logger.warning(f"Task graph has {len(self.end_task_ids)} end tasks and does not converge to a single task. Consider reviewing task dependencies.")
+            self.logger.warning(
+                f"Task graph has {len(self.end_task_ids)} end tasks and does not converge to a single task. Consider reviewing task dependencies."
+            )
 
-    def _register_and_fetch_dependents(self, task: Task, visited: Set[str] = None) -> Set[str]:
+    def _register_and_fetch_dependents(
+        self, task: Task, visited: Set[str] = None
+    ) -> Set[str]:
         """recursively get all dependent tasks with cycle detection"""
         if visited is None:
             visited = set()
-            
+
         # Cycle detection
         if task.id in visited:
             raise ValueError(
                 f"Cyclic dependency detected: Task {task} forms a cycle in the task graph."
             )
-        
+
         visited.add(task.id)
         self.tasks[task.id] = task
 
@@ -220,7 +230,7 @@ class Neo:
                 if "tools" in kwargs and kwargs["tools"]:
                     resolved_tools = []
                     model_class = self.model_registry.get_model_registry(
-                        model_configs.model
+                        model_configs.model, fuzzy_mode=self.model_registry_fuzzy_mode
                     )["class"]
 
                     for tool_item in kwargs["tools"]:

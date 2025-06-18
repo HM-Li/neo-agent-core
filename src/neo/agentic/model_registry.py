@@ -1,3 +1,4 @@
+import difflib
 from typing import Callable, List, Literal, Optional
 
 from pydantic import BaseModel
@@ -10,6 +11,7 @@ from neo.models.providers.openai import OpenAICompleteModel, OpenAIResponseModel
 from neo.models.providers.xai import XAIModel
 from neo.tools import Tool
 from neo.types.modalities import Modality
+from neo.utils.logger import get_logger
 from neo.utils.singleton import Singleton
 
 
@@ -21,6 +23,7 @@ class ModelRegistry(metaclass=Singleton):
     def __init__(self):
         # internal registry dict
         self._registry = {}
+        self.logger = get_logger("ModelRegistry")
 
     def register_model(
         self, model: str, cls: BaseChatModel, input_modalities: List[Modality]
@@ -52,7 +55,7 @@ class ModelRegistry(metaclass=Singleton):
             raise ValueError(f"A model is already registered under the model '{model}'")
         self._registry[model] = {"class": cls, "input_modalities": input_modalities}
 
-    def get_model_registry(self, model: str) -> dict:
+    def get_model_registry(self, model: str, fuzzy_mode: bool = False) -> dict:
         """
         Retrieve a previously registered model by model name.
 
@@ -60,6 +63,8 @@ class ModelRegistry(metaclass=Singleton):
         ----------
         model : str
             The string key associated with the model.
+        fuzzy_mode : bool, optional
+            If True, find the model with the smallest edit distance when exact match fails, by default False
 
         Returns
         -------
@@ -72,9 +77,24 @@ class ModelRegistry(metaclass=Singleton):
             If no model has been registered under the given model name.
         """
         model = model.lower()
-        if model not in self._registry:
+        if model in self._registry:
+            return self._registry[model]
+
+        if not fuzzy_mode:
             raise KeyError(f"No model has been registered under the model '{model}'")
-        return self._registry[model]
+
+        # Find closest match using edit distance
+        closest_match = difflib.get_close_matches(
+            model, self._registry.keys(), n=1, cutoff=0.0
+        )
+        if not closest_match:
+            raise KeyError(f"No model has been registered under the model '{model}'")
+
+        self.logger.warning(
+            f"Model '{model}' not found. Using closest match: '{closest_match[0]}'"
+        )
+
+        return self._registry[closest_match[0]]
 
     def create_model(
         self,
@@ -244,22 +264,27 @@ models = [
     (
         "gemini-2.0-flash",
         GoogleAIModel,
-        [Modality.TEXT],
+        [Modality.TEXT, Modality.STRUCTURED],
     ),
     (
         "gemini-2.0-flash-lite",
         GoogleAIModel,
-        [Modality.TEXT],
+        [Modality.TEXT, Modality.STRUCTURED],
     ),
     (
-        "gemini-2.5-flash-preview-04-17",
+        "gemini-2.5-flash",
         GoogleAIModel,
-        [Modality.TEXT],
+        [Modality.TEXT, Modality.STRUCTURED],
     ),
     (
-        "gemini-2.5-pro-preview-05-06",
+        "gemini-2.5-pro",
         GoogleAIModel,
-        [Modality.TEXT],
+        [Modality.TEXT, Modality.STRUCTURED],
+    ),
+    (
+        "gemini-2.5-flash-lite-preview-06-17",
+        GoogleAIModel,
+        [Modality.TEXT, Modality.STRUCTURED],
     ),
     ("grok-2", XAIModel, [Modality.TEXT, Modality.STRUCTURED]),
     ("grok-3-mini", XAIModel, [Modality.TEXT, Modality.STRUCTURED]),
