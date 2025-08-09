@@ -64,6 +64,8 @@ class BaseChatModel(ABC):
         If True, enables thinking mode for the model (currently supported by Anthropic models).
     thinking_budget_tokens : int, default 1024
         The number of tokens allocated for thinking when thinking mode is enabled.
+    auto_tool_run : bool, default True
+        If True, automatically executes tools when they are called by the model. If False, returns tool calls without executing them.
     """
 
     PROMPT_TEMPLATE = {
@@ -91,6 +93,8 @@ class BaseChatModel(ABC):
         timeaware: bool = False,
         enable_thinking: bool = None,
         thinking_budget_tokens: int = None,
+        tool_preamble: bool = False,
+        auto_tool_run: bool = True,
     ):
         if (
             sum(
@@ -124,6 +128,8 @@ class BaseChatModel(ABC):
         self.tool_choice = tool_choice
         self.timeaware = timeaware
         self.enable_thinking = enable_thinking
+        self.tool_preamble = tool_preamble
+        self.auto_tool_run = auto_tool_run
 
         if self.enable_thinking is not None:
             self.thinking_budget_tokens = thinking_budget_tokens or 1024
@@ -390,7 +396,7 @@ class BaseChatModel(ABC):
 
     def get_augmented_instruction(self, timestamp: str = None) -> str:
         """
-        Add time-aware instruction to the system message.
+        Add time-aware instruction and tool preamble instruction to the system message.
         """
         instruction = self.instruction if self.instruction else ""
         if self.timeaware is True:
@@ -401,6 +407,8 @@ class BaseChatModel(ABC):
             instruction += (
                 " You can use this information to provide more accurate responses. "
             )
+        if self.tool_preamble is True:
+            instruction += " Before you call a tool, explain why you are calling it."
         return instruction
 
     async def aclear_registries(self) -> None:
@@ -432,7 +440,7 @@ class BaseChatModel(ABC):
             return tool_schema
 
         tool_schema = self.tool_to_json_schema(tool)
-        
+
         if not isinstance(tool, Tool):
             tool = Tool(func=tool)
 
@@ -472,7 +480,7 @@ class BaseChatModel(ABC):
         """
         Check if the tool is an internal tool provided by this model.
         """
-        if callable(tool) and not hasattr(tool, 'provider'):
+        if callable(tool) and not hasattr(tool, "provider"):
             return False
 
         # If the tool is a BaseTool instance, check its provider
@@ -483,7 +491,7 @@ class BaseChatModel(ABC):
         # If the tool is a class (type), check if it's a subclass of BaseTool and has the right provider
         if isinstance(tool, type) and issubclass(tool, BaseTool):
             # Check if the provider of the tool class is the same as the class name
-            return hasattr(tool, 'provider') and tool.provider == cls.__name__
+            return hasattr(tool, "provider") and tool.provider == cls.__name__
 
         return False
 
@@ -521,6 +529,9 @@ class BaseChatModel(ABC):
                         out = await tool.func(**content.params)
                     else:
                         out = tool.func(**content.params)
+
+            except ToolError as e:
+                raise
             except Exception as e:
                 raise ToolRuntimeError(e) from e
 

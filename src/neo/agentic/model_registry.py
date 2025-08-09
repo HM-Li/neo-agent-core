@@ -237,7 +237,32 @@ models = [
     ),
     ("o3-mini", OpenAIResponseModel, [Modality.TEXT]),
     (
+        "o3-deep-research",
+        OpenAIResponseModel,
+        [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
+    ),
+    (
         "o4-mini",
+        OpenAIResponseModel,
+        [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
+    ),
+    (
+        "o4-mini-deep-research",
+        OpenAIResponseModel,
+        [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
+    ),
+    (
+        "gpt-5",
+        OpenAIResponseModel,
+        [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
+    ),
+    (
+        "gpt-5-mini",
+        OpenAIResponseModel,
+        [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
+    ),
+    (
+        "gpt-5-nano",
         OpenAIResponseModel,
         [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
     ),

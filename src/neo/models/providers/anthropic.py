@@ -366,8 +366,9 @@ class AnthropicModel(BaseChatModel):
                     )
                     contents.append(tool_input)
 
-                    # handle tool call
-                    tool_output = await self.handle_single_tool_response(tool_input)
+                    # handle tool call if auto_tool_run is enabled
+                    if self.auto_tool_run:
+                        tool_output = await self.handle_single_tool_response(tool_input)
 
             else:
                 raise TypeError(f"Unsupported API response content type: {item.type}")
@@ -382,7 +383,7 @@ class AnthropicModel(BaseChatModel):
         )
         contexts.append(c)
 
-        if tool_output is not None:
+        if tool_output is not None and self.auto_tool_run:
             c = Context(
                 contents=tool_output,
                 provider_role=Role.USER,

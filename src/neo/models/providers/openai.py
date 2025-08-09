@@ -296,18 +296,19 @@ class OpenAICompleteModel(BaseChatModel):
                 )
                 tool_call_context.contents.append(tool_input_content)
 
-                # Execute tool and create tool output context
-                tool_output_content = await self.handle_single_tool_response(
-                    content=tool_input_content
-                )
-                tool_output_contexts.append(
-                    Context(
-                        contents=tool_output_content,
-                        provider_role=Role.TOOL,
-                        provider_name=None,
-                        provider_context_id=response.id,
+                # Execute tool and create tool output context if auto_tool_run is enabled
+                if self.auto_tool_run:
+                    tool_output_content = await self.handle_single_tool_response(
+                        content=tool_input_content
                     )
-                )
+                    tool_output_contexts.append(
+                        Context(
+                            contents=tool_output_content,
+                            provider_role=Role.TOOL,
+                            provider_name=None,
+                            provider_context_id=response.id,
+                        )
+                    )
             # Add tool call context and tool output contexts to the main contexts
             contexts.append(tool_call_context)
             contexts.extend(tool_output_contexts)
@@ -739,19 +740,20 @@ class OpenAIResponseModel(BaseChatModel):
                         provider_context_id=item.id,
                     )
                 )
-                # handle tool input
-                tool_output_content = await self.handle_single_tool_response(
-                    content=tool_input_content
-                )
-
-                contexts.append(
-                    Context(
-                        contents=tool_output_content,
-                        provider_role=Role.USER,
-                        provider_name=None,
-                        provider_context_id=item.id,
+                # handle tool input if auto_tool_run is enabled
+                if self.auto_tool_run:
+                    tool_output_content = await self.handle_single_tool_response(
+                        content=tool_input_content
                     )
-                )
+
+                    contexts.append(
+                        Context(
+                            contents=tool_output_content,
+                            provider_role=Role.USER,
+                            provider_name=None,
+                            provider_context_id=item.id,
+                        )
+                    )
             elif item.type == "reasoning":
                 # Handle reasoning (thinking) blocks from OpenAI
                 for summary in item.summary:
