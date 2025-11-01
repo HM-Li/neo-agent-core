@@ -649,16 +649,20 @@ class OpenAIResponseModel(BaseChatModel):
 
         configs = copy.deepcopy(self.configs)
 
-        text_config = {}
+        format_configs = {}
         if self.json_mode:
-            text_config["format"] = {"type": "json_object"}
+            format_configs = {"type": "json_object"}
         elif self.boolean_response:
-            text_config["format"] = self.base_model_to_json_schema(BooleanContent)
+            format_configs = self.base_model_to_json_schema(BooleanContent)
         elif self.structured_response_model:
-            text_config["format"] = self.base_model_to_json_schema(
+            format_configs = self.base_model_to_json_schema(
                 self.structured_response_model
             )
-        configs["text"] = text_config or None
+            
+        if format_configs:
+            text_config = configs.get("text", {}) or {}
+            text_config["format"] = format_configs  
+            configs["text"] = text_config
 
         # OpenAI expects "max_output_tokens" instead of "max_tokens" for the response API.
         if "max_tokens" in configs:
