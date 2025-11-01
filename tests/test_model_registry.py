@@ -112,3 +112,33 @@ def test_create_openai_model_with_none_thinking_params():
     assert isinstance(model, OpenAIResponseModel)
     # OpenAI models shouldn't have thinking attributes set when they're None
     assert not hasattr(model, 'thinking_budget_tokens') or model.enable_thinking is None
+
+
+def test_gpt5_pro_model_registered():
+    """Test that gpt-5-pro is properly registered."""
+    registry = ModelRegistry()
+
+    # Test gpt-5-pro registration
+    assert "gpt-5-pro" in registry.supported_models
+
+    # Test that it maps to OpenAIResponseModel
+    all_models = registry.supported_models
+    gpt5_pro_info = all_models["gpt-5-pro"]
+
+    assert gpt5_pro_info.get("class") == OpenAIResponseModel
+
+
+def test_gpt5_pro_supports_multimodal():
+    """Test that gpt-5-pro supports expected modalities."""
+    registry = ModelRegistry()
+
+    # Test gpt-5-pro modalities
+    gpt5_pro_modalities = registry.check_model_input_modalities("gpt-5-pro")
+    expected_modalities = [
+        Modality.TEXT,
+        Modality.IMAGE,
+        Modality.STRUCTURED,
+        Modality.DOCUMENT,
+    ]
+
+    assert set(gpt5_pro_modalities) == set(expected_modalities)

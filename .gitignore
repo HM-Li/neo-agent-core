@@ -121,6 +121,9 @@ dmypy.json
 # playground folder
 playground/
 
+# git worktrees
+.worktrees/
+
 # jupyter releaser checkout
 .jupyter_releaser_checkout
 

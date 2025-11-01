@@ -59,13 +59,16 @@ def group_by_len(text, max_len: int = 1024) -> Iterable[str]:
             yield __r
 
 
-import asyncio
 import os
-from concurrent.futures import ThreadPoolExecutor
+import time
+import threading
+from collections import deque
 
 
 class CustomLogger(logging.Logger):
-    _executor = None
+    _message_queue = deque()
+    _rate_limiter_thread = None
+    _rate_limit_lock = threading.Lock()
 
     def __init__(
         self, name: str, level: int | str = 0, send_webhook: bool = True
@@ -78,55 +81,85 @@ class CustomLogger(logging.Logger):
 
         super().__init__(name, level)
 
+        # Start rate limiter thread if webhook is enabled
+        if self.send_webhook:
+            self._start_rate_limiter()
+
     @classmethod
-    def _get_executor(cls):
-        if cls._executor is None:
-            cls._executor = ThreadPoolExecutor(
-                max_workers=5, thread_name_prefix="LoggerWebhook"
+    def _start_rate_limiter(cls):
+        """Start the background thread that processes the message queue"""
+        if cls._rate_limiter_thread is None or not cls._rate_limiter_thread.is_alive():
+            cls._rate_limiter_thread = threading.Thread(
+                target=cls._process_queue, daemon=True, name="WebhookRateLimiter"
             )
-        return cls._executor
+            cls._rate_limiter_thread.start()
+
+    @classmethod
+    def _process_queue(cls):
+        """Background thread that sends messages from the queue at a controlled rate"""
+        while True:
+            try:
+                with cls._rate_limit_lock:
+                    if cls._message_queue:
+                        url, payload = cls._message_queue.popleft()
+                    else:
+                        url, payload = None, None
+
+                if url and payload:
+                    cls._blocking_post_with_retry(url, payload)
+
+                # Discord limit: 5 requests per 2 seconds
+                # Sleep 0.5s = 2 requests/sec = well under the limit
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"CustomLogger: Rate limiter error: {e}")
+                time.sleep(1)
+
+    @staticmethod
+    def _blocking_post_with_retry(url, json_payload, max_retries=3):
+        """Send webhook with exponential backoff on 429 errors"""
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, json=json_payload, timeout=10)
+
+                if response.status_code == 429:
+                    # Rate limited - check Retry-After header
+                    retry_after = int(response.headers.get('Retry-After', 5))
+                    print(f"CustomLogger: Rate limited (429), waiting {retry_after}s")
+                    time.sleep(retry_after)
+                    continue
+
+                if response.status_code not in (200, 204):
+                    print(f"CustomLogger: Webhook failed: HTTP {response.status_code}")
+
+                return  # Success
+
+            except requests.exceptions.RequestException as e:
+                print(f"CustomLogger: Webhook request error: {e}")
+                if attempt < max_retries - 1:
+                    backoff = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    time.sleep(backoff)
+            except Exception as e:
+                print(f"CustomLogger: Unexpected webhook error: {e}")
+                return
 
     def _send_webhook_message(self, log_type: str, message: str):
+        """Queue a message for webhook delivery instead of sending immediately"""
         if not self.send_webhook or not self.webhook_url:
             return
 
-        # This function will be executed in a separate thread by the executor
-        def _blocking_post(url, json_payload):
-            try:
-                requests.post(url, json=json_payload, timeout=10)
-            except requests.exceptions.RequestException as e:
-                # Log to stderr or a fallback mechanism to avoid recursion and further blocking
-                print(
-                    f"CustomLogger: Webhook request failed for {self.name} ({log_type}): {e}"
-                )
-            except Exception as e:
-                # Catch any other unexpected errors in the thread
-                print(
-                    f"CustomLogger: Unexpected error in webhook sending thread for {self.name} ({log_type}): {e}"
-                )
-
-        starter = True
         log_type_capitalized = log_type.capitalize()
-        for r_chunk in group_by_len(message, max_len=1900):
-            current_chunk_content_with_header = r_chunk
-            if starter:
-                header = "=" * 50
-                header += f"\n# {self.name}: \t{log_type_capitalized}\n"
-                current_chunk_content_with_header = header + r_chunk
-                starter = False
 
-            payload = {"content": current_chunk_content_with_header}
+        # Add header to message before chunking
+        header = "=" * 50
+        header += f"\n# {self.name}: \t{log_type_capitalized}\n"
+        full_message = header + message
 
-            try:
-                loop = asyncio.get_running_loop()
-                # If we are in an asyncio event loop, run the blocking call in an executor
-                executor = CustomLogger._get_executor()
-                loop.run_in_executor(
-                    executor, _blocking_post, self.webhook_url, payload
-                )
-            except RuntimeError:  # No running event loop
-                # Not in an asyncio event loop (e.g., synchronous script), call directly
-                _blocking_post(self.webhook_url, payload)
+        # Add each chunk to the queue for rate-limited sending
+        for r_chunk in group_by_len(full_message, max_len=1900):
+            payload = {"content": r_chunk}
+            with self._rate_limit_lock:
+                self._message_queue.append((self.webhook_url, payload))
 
     def info(self, msg, *args, **kwargs):
         if self.isEnabledFor(logging.INFO):

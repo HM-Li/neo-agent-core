@@ -1,6 +1,6 @@
 from __future__ import annotations  # for TYPE_CHECKING
 
-from typing import TYPE_CHECKING, Any, ClassVar, List, Optional
+from typing import Any, ClassVar, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 

@@ -113,6 +113,8 @@ class ModelRegistry(metaclass=Singleton):
         timeaware: bool = False,
         enable_thinking: bool = None,
         thinking_budget_tokens: int = None,
+        tool_preamble: bool = False,
+        auto_tool_run: bool = True,
     ) -> BaseChatModel:
         """
         Create an instance of a registered model.
@@ -159,6 +161,8 @@ class ModelRegistry(metaclass=Singleton):
             timeaware=timeaware,
             enable_thinking=enable_thinking,
             thinking_budget_tokens=thinking_budget_tokens,
+            tool_preamble=tool_preamble,
+            auto_tool_run=auto_tool_run,
         )
         return model_instance
 
@@ -263,6 +267,11 @@ models = [
     ),
     (
         "gpt-5-nano",
+        OpenAIResponseModel,
+        [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
+    ),
+    (
+        "gpt-5-pro",
         OpenAIResponseModel,
         [Modality.TEXT, Modality.IMAGE, Modality.STRUCTURED, Modality.DOCUMENT],
     ),
