@@ -64,23 +64,23 @@ async def test_thread_context_manipulation():
     assert len(thread._contexts) == 0  # Using public property instead
 
     # Append string
-    await thread.append_context("first")
+    await thread.append("first")
     assert len(thread._contexts) == 1
     assert thread._contexts[0].contents[0].data == "first"
 
     # Append context
     ctx = Context(contents="second", role=Role.ASSISTANT)
-    await thread.append_context(ctx)
+    await thread.append(ctx)
     assert len(thread._contexts) == 2
     assert thread._contexts[1] == ctx
 
     # Get context
-    assert thread.get_context(0).contents[0].data == "first"
-    assert thread.get_context(1) == ctx
-    assert thread.get_context(-1) == ctx
+    assert thread.get(0).contents[0].data == "first"
+    assert thread.get(1) == ctx
+    assert thread.get(-1) == ctx
 
     with pytest.raises(IndexError):
-        thread.get_context(2)
+        thread.get(2)
 
 
 def test_thread_serialization():

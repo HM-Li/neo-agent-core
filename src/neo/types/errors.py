@@ -5,6 +5,8 @@ class ModelServiceError(Exception):
 class ModelModalityError(Exception):
     pass
 
+class ModelConfigError(Exception):
+    pass
 
 class ContextLengthExceededError(Exception):
     pass
@@ -24,3 +26,4 @@ class ToolRuntimeError(ToolError):
 
 class TaskRuntimeError(Exception):
     pass
+

@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Type
 
 import httpx
 from pydantic import BaseModel, Field, field_validator
@@ -40,6 +40,7 @@ class ModelConfigs(BaseModel):
         description="The timeout (seconds) configuration for the model's requests.",
     )
 
+
     @field_validator("timeout", mode="before")
     @classmethod
     def _validate_timeout(cls, v):
@@ -67,6 +68,21 @@ class OtherConfigs(BaseModel, extra="allow"):
     custom_api_key: Optional[str] = Field(
         default=None,
         description="Custom API key for the model.",
+    )
+
+    boolean_response: Optional[bool] = Field(
+        default=False,
+        description="Whether the model response is expected to be boolean.",
+    )
+    
+    structured_response_model: Optional[Type[BaseModel]] = Field(
+        default=None,
+        description="Pydantic model class defining the structured response format expected from the model.",
+    )
+    
+    json_mode: Optional[bool] = Field(
+        default=False,
+        description="Whether the model response is expected to be in JSON format.",
     )
 
 

@@ -1,12 +1,13 @@
 from enum import Enum
-from typing import Any, ClassVar, List, Optional
+from abc import ABC
+from typing import Any, Callable, ClassVar, List, Optional, Dict
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from neo.agentic.instruction import Instruction
 from neo.contexts import Context, Thread
 from neo.utils.ids import IDMixin
-
+from neo.models.base import BaseChatModel
 
 class TaskStatus(str, Enum):
     """Status of a task during execution."""
@@ -17,13 +18,111 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
+class BaseTask(BaseModel, ABC, IDMixin):
 
-class Task(IDMixin, BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    subsequent_tasks: Optional[
+        List["BaseTask"] | Dict[str, "BaseTask"]
+    ] = Field(
+        default=None,
+        description=(
+            "Dependent tasks that depend on this task. If a list, tasks will be "
+            "triggered once this task is complete. If a dict, tasks will be triggered "
+            "based on this task's output (the last content of the last context of the deliverable thread casted as a string) matching the dict keys."
+        ),
+        exclude=True,
+        repr=False,
+    )
+
+    id: str = Field(
+        default=None,
+        description="Unique identifier for the task. Can be a UUID or a name of the task.",
+    )
+
+    SHORT_ID_LENGTH: ClassVar[int] = 5
+
+    @model_validator(mode="before")
+    @classmethod
+    def _generate_id_if_not_provided(cls, values):
+        """Generate ID using the actual class name if not provided."""
+        if isinstance(values, dict) and values.get("id") is None:
+            values["id"] = cls.generate_id()
+        return values
+
+    deliverable: Optional[Thread | Context] = Field(
+        default=None, description="The deliverable of the task.", exclude=True
+    )
+    
+    unfinished_deliverable: Optional[Thread | Context] = Field(
+        default=None, description="The unfinished deliverable of the task during execution.", exclude=True
+    )
+
+    base_thread_snapshot: Optional[Thread] = Field(
+        default=None,
+        description="The base thread snapshot for the task.",
+        exclude=True,
+    )
+    
+    done_by: Optional[BaseChatModel] = Field(
+        default=None,
+        description="The model that completed the task.",
+        exclude=True,
+    )
+
+    status: TaskStatus = Field(
+        default=TaskStatus.PENDING, description="Current status of the task execution."
+    )
+
+    def add_subsequent_task(self, task: "BaseTask", trigger: str = None) -> None:
+        """Add a dependent task to the current task."""
+        if self.subsequent_tasks is None:
+            self.subsequent_tasks = [] if trigger is None else {}
+        
+        if trigger is not None:
+            if not isinstance(self.subsequent_tasks, dict):
+                raise ValueError("subsequent_tasks must be a dict when using triggers.")
+            self.subsequent_tasks[trigger] = task
+        else:
+            if not isinstance(self.subsequent_tasks, list):
+                raise ValueError("subsequent_tasks must be a list when not using triggers.")
+            self.subsequent_tasks.append(task)
+            
+    def list_subsequent_tasks(self) -> List["BaseTask"]:
+        """List all dependent tasks of the current task."""
+        if self.subsequent_tasks is None:
+            return []
+        
+        if isinstance(self.subsequent_tasks, list):
+            return self.subsequent_tasks
+        else:
+            return list(self.subsequent_tasks.values())
+
+    def reset(self) -> None:
+        """Reset the task to its initial state."""
+        self.status = TaskStatus.PENDING
+        self.deliverable = None
+        self.base_thread_snapshot = None
+        
+    def __str__(self) -> str:
+        """String representation of the Task."""
+
+        status_emoji = {
+            TaskStatus.PENDING: "⏳",
+            TaskStatus.RUNNING: "🔄",
+            TaskStatus.COMPLETED: "✅",
+            TaskStatus.FAILED: "❌",
+            TaskStatus.CANCELLED: "🚫",
+        }.get(self.status, "❓")
+
+        return f'<Task | Name: "{self.id}", Status: {status_emoji}{self.status.value}>'
+        
+
+
+class ModelTask(BaseTask):
     """The Task class encapsulates a task with user input, instruction code, instruction,
     and dependent tasks.
     """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     user_input: Optional[str | Context] = Field(
         default=None,
@@ -33,36 +132,6 @@ class Task(IDMixin, BaseModel):
     instruction: Optional[Instruction | str] = Field(
         default=None,
         description="Instruction for the task. If string, it matches with the Instruction code.",
-    )
-
-    subsequent_tasks: Optional[List["Task"]] = Field(
-        default=None,
-        description="List of dependent tasks that depend on this task.",
-        exclude=True,
-        repr=False,
-    )
-
-    id: str = Field(
-        default_factory=lambda: Task.generate_id(),
-        description="Unique identifier for the task.",
-    )
-
-    name: Optional[str] = Field(default=None, description="The name of the task.")
-
-    SHORT_ID_LENGTH: ClassVar[int] = 5
-
-    deliverable: Optional[Thread] = Field(
-        default=None, description="The deliverable of the task.", exclude=True
-    )
-
-    base_thread_snapshot: Optional[Thread] = Field(
-        default=None,
-        description="The base thread snapshot for the task.",
-        exclude=True,
-    )
-
-    status: TaskStatus = Field(
-        default=TaskStatus.PENDING, description="Current status of the task execution."
     )
 
     @field_validator("user_input")
@@ -90,55 +159,22 @@ class Task(IDMixin, BaseModel):
         if not self.user_input and not self.instruction:
             raise ValueError("Either user_input or instruction must be provided.")
 
-    def add_subsequent_task(self, task: "Task") -> None:
-        """Add a dependent task to the current task."""
-        if self.subsequent_tasks is None:
-            self.subsequent_tasks = []
-        self.subsequent_tasks.append(task)
 
-    def reset(self) -> None:
-        """Reset the task to its initial state."""
-        self.status = TaskStatus.PENDING
-        self.deliverable = None
-        self.base_thread_snapshot = None
+class FunctionTask(BaseTask):
+    """A task that executes a Python callable function.
 
-    def __str__(self) -> str:
-        """String representation of the Task."""
+    The callable receives the Neo state dict (mapping task IDs to BaseTask objects)
+    and must return a Context object.
+    """
 
-        _id = self.id[-self.SHORT_ID_LENGTH :]
-        status_emoji = {
-            TaskStatus.PENDING: "⏳",
-            TaskStatus.RUNNING: "🔄",
-            TaskStatus.COMPLETED: "✅",
-            TaskStatus.FAILED: "❌",
-            TaskStatus.CANCELLED: "🚫",
-        }.get(self.status, "❓")
+    func: Callable[[Dict[str, BaseTask]], Context] = Field(
+        ...,
+        description="Callable that receives state dict and returns a Context object.",
+    )
 
-        if self.name:
-            return f'<Task | Name: "{self.name}", Status: {status_emoji}{self.status.value}, ID: {_id}>'
-
-        def get_truncated_string(s: Optional[str], max_len: int = 20) -> str:
-            if not s:
-                return "N/A"
-            s = repr(str(s))
-            if len(s) > max_len:
-                return s[: max_len - 3] + "..."
-            return s
-
-        user_input_str = get_truncated_string(
-            str(self.user_input) if self.user_input else None
-        )
-        instruction_str = get_truncated_string(
-            str(self.instruction) if self.instruction else None
-        )
-
-        parts = []
-        if self.user_input:
-            parts.append(f'Input: "{user_input_str}"')
-        if self.instruction:
-            parts.append(f'Instr: "{instruction_str}"')
-
-        parts.append(f"Status: {status_emoji}{self.status.value}")
-        parts.append(f"ID: {_id}")
-
-        return f"<Task | {', '.join(parts)}>"
+    @field_validator("func")
+    @classmethod
+    def _validate_func(cls, v):
+        if not callable(v):
+            raise ValueError("func must be callable.")
+        return v

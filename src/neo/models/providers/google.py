@@ -1,6 +1,7 @@
 import copy
 import os
-from typing import Any, List, Union
+import json
+from typing import Any, List, Union, Callable
 
 import httpx
 from google import genai
@@ -9,9 +10,18 @@ from pydantic import BaseModel
 
 from neo.contexts.context import Context
 from neo.contexts.thread import Thread
-from neo.models.providers.base import BaseChatModel
-from neo.types.contents import BooleanContent, TextContent
-from neo.types.errors import ModelServiceError
+from neo.models.base import BaseChatModel
+from neo.tools import BaseTool, Tool
+from neo.types.contents import (
+    BooleanContent,
+    TextContent,
+    ThoughtContent,
+    ToolInputContent,
+    ToolOutputContent,
+    BaseContent,
+    StructuredContent,
+)
+from neo.types.errors import ModelServiceError, ModelConfigError, ToolError
 from neo.types.roles import Role
 
 
@@ -24,7 +34,7 @@ class GoogleAIModel(BaseChatModel):
 
     @property
     def unsupported_params(self) -> List[str]:
-        return ["tools", "mcp_clients"]
+        return []
 
     def create_client(self):
         # by default the client prioritize GOOGLE_API_KEY instead of GEMINI_API_KEY
@@ -47,29 +57,87 @@ class GoogleAIModel(BaseChatModel):
     def get_base_url(self) -> str:
         raise NotImplementedError("GoogleAIModel does not have a base URL")
 
-    def context_to_prompt(self, context: Context) -> dict:
+    @classmethod
+    def tool_to_json_schema(cls, tool: BaseTool | Callable) -> dict:
+        """Convert a tool to Google GenAI function declaration format."""
+        if callable(tool):
+            tool = Tool(func=tool)
+
+        if not isinstance(tool, BaseTool):
+            raise ToolError(
+                f"The provided tool is not a callable or a BaseTool instance: {tool}"
+            )
+
+        if cls.is_internal_tool(tool):
+            tool_schema = tool.model_dump(exclude_none=True)
+        else:
+            # Google doesn't accept additionalProperties in parameters
+            params = copy.deepcopy(tool.params)
+            params.pop("additionalProperties", None)
+
+            tool_schema = {
+                "name": tool.name,
+                "description": tool.description if tool.description else "",
+                "parameters": params,
+            }
+
+        return tool_schema
+
+    def context_to_prompt(self, context: Context | List[BaseContent], add_role: bool = True) -> dict:
         """
         Convert a single Context to Google GenAI Parts.
         Required by base class but not used in our thread_to_prompt override.
         """
-        # Only support user and assistant roles
-        if context.provider_role not in [Role.USER, Role.ASSISTANT]:
-            raise ValueError(
-                "Only user and assistant roles are supported by GoogleAIModel"
-            )
+        is_provider_context = False
+        
+        if isinstance(context, Context):
+            # Detect if the same provider's context
+            is_provider_context = context.provider_name == __class__.__name__
+            contents = context.contents
+        else:
+            contents = context
 
         # Convert context contents to Google GenAI Parts
         parts = []
-        for content in context.contents:
-            if isinstance(content, TextContent):
-                parts.append(types.Part.from_text(text=content.data))
-            # TODO: Add support for other content types (images, documents, etc.)
-            # elif isinstance(content, ImageContent):
-            #     parts.append(types.Part.from_uri(...))
+        for content in contents:
+            match content:
+                case TextContent():
+                    parts.append(types.Part.from_text(text=content.data))
+
+                case ToolInputContent():
+                    # treat as raw_data if same provider context
+                    if is_provider_context:
+                        parts.append(content.raw_data)
+                    else:
+                        parts.append(types.Part.from_text(text=f"<Tool Input>: {str(content.raw_data)}"))
+
+                case ToolOutputContent():
+                    # treat as raw_data if same provider context
+                    if is_provider_context:
+                        parts.append(content.raw_data)
+                    else:
+                        parts.append(types.Part.from_text(text=f"<Tool Output>: {str(content.raw_data)}"))
+
+                case ThoughtContent():
+                    # treat as raw_data if same provider context
+                    if is_provider_context:
+                        parts.append(content.raw_data)
+                    else:
+                        parts.append(types.Part.from_text(text=f"<Thought Content>: {str(content.raw_data)}"))
+
+                # TODO: Add support for other content types (images, documents, etc.)
+                # case ImageContent():
+                #     parts.append(types.Part.from_uri(...))
+
+                case _:
+                    _str = str(content) if not hasattr(content, "data") else str(content.data)
+                    parts.append(types.Part.from_text(text=_str))
 
         if not parts:
             raise ValueError("No valid content found in context")
 
+        if not add_role:
+            return {"parts": parts}
         return {"parts": parts, "role": context.provider_role}
 
     async def thread_to_prompt(
@@ -199,36 +267,113 @@ class GoogleAIModel(BaseChatModel):
         if http_options is not None:
             gen_config_args["http_options"] = http_options
 
-        # Add thinking configuration if enabled
-        if self.enable_thinking:
-            gen_config_args["thinking_config"] = types.ThinkingConfig(
-                include_thoughts=True,
-                thinking_budget=self.thinking_budget_tokens,
-            )
-
         if instruction:  # Only add system_instruction if it's not None and not empty
             gen_config_args["system_instruction"] = instruction
+
+        # Add tools configuration
+        function_declarations = []
+        if self.tools is not None:
+            for tool in self.tools:
+                tool_schema = self.register_tool(tool)
+                function_declarations.append(tool_schema)
+
+        # Add mcp clients
+        if self.mcp_clients is not None:
+            for client in self.mcp_clients:
+                client_tool_schemas = await self.bind_mcp_client(client)
+                function_declarations.extend(client_tool_schemas)
+
+        if len(function_declarations) > 0:
+            tools = types.Tool(function_declarations=function_declarations)
+            gen_config_args["tools"] = [tools]
 
         final_configs = types.GenerateContentConfig(**gen_config_args)
 
         return native_contents, final_configs, thread
 
     async def add_response_to_thread(self, thread, response):
-        contents = []
+        contexts = []
 
-        # Handle thinking content if present
+        # Handle response parts
         if hasattr(response, "candidates") and response.candidates:
             candidate = response.candidates[0]
-            if hasattr(candidate, "content") and hasattr(candidate.content, "parts"):
+            if hasattr(candidate, "content") and hasattr(candidate.content, "parts") and candidate.content.parts:
+                assistant_contents = []
+                tool_output_contexts = []
+
                 for part in candidate.content.parts:
                     if hasattr(part, "thought") and part.thought:
-                        # Log thinking content similar to Anthropic implementation
+                        # Log and store thinking content
                         self.logger.thinking(part.text)
+                        assistant_contents.append(ThoughtContent(raw_data=part))
+
+                    elif hasattr(part, "function_call") and part.function_call:
+                        # Handle function call
+                        tool_input = ToolInputContent(raw_data=part)
+                        assistant_contents.append(tool_input)
+
+                        # Execute tool if auto_tool_run is enabled
+                        if self.auto_tool_run:
+                            # Extract function call details
+                            func_call = part.function_call
+                            params = dict(func_call.args)
+
+                            output, is_error = await self.handle_single_tool_response(
+                                tool_name=func_call.name, params=params
+                            )
+
+                            # Package tool output as Google expects
+                            context_data = self.context_to_prompt(output, add_role=False)
+                            function_response_part = types.Part.from_function_response(
+                                name=func_call.name,
+                                response={"result": context_data["parts"]},
+                            )
+
+                            tool_output = ToolOutputContent(raw_data=function_response_part)
+                            tool_output_contexts.append(
+                                Context(
+                                    contents=tool_output,
+                                    provider_role=Role.USER,
+                                    provider_name=__class__.__name__,
+                                )
+                            )
+
                     elif hasattr(part, "text") and part.text:
-                        contents.append(TextContent(data=part.text))
+                        text = part.text.strip()
+                        
+                        if self.boolean_response is True:
+                            # gemini returns a list of json objects
+                            content = BooleanContent(**json.loads(text)[0])
+                            assistant_contents.append(content)
+                        elif self.structured_response_model is not None:
+                            params = json.loads(text)[0]
+                            content = self.structured_response_model(**params)
+                            content = StructuredContent(data=content)
+                            assistant_contents.append(content)
+                        else:
+                            assistant_contents.append(TextContent(data=text))
+
+                    # log thought signature if available (this is for gemini-3-pro and beyond)
+                    if hasattr(part, "thought_signature") and part.thought_signature:
+                        self.logger.thinking(
+                            f"Encrypted thought signature found..."
+                        )
+
+                # Create assistant context
+                if assistant_contents:
+                    contexts.append(
+                        Context(
+                            contents=assistant_contents,
+                            provider_role=Role.ASSISTANT,
+                            provider_name=__class__.__name__,
+                        )
+                    )
+
+                # Add tool output contexts
+                contexts.extend(tool_output_contexts)
 
         # Fallback to existing logic if no parts found
-        if not contents:
+        if not contexts:
             if response.parsed is not None:
                 response_text = response.parsed[0]
             else:
@@ -237,10 +382,20 @@ class GoogleAIModel(BaseChatModel):
             if not isinstance(response_text, str):
                 response_text = str(response_text)
 
-            contents.append(TextContent(data=response_text))
+            contexts.append(
+                Context(
+                    contents=TextContent(data=response_text),
+                    provider_role=Role.ASSISTANT,
+                    provider_name=__class__.__name__,
+                )
+            )
+        
+        # add raw response to contexts
+        for c in contexts:
+            c.raw_response = response
 
-        context = Context(contents=contents, provider_role=Role.ASSISTANT)
-        await thread.append_context(context)
+        # Add all contexts to thread
+        await thread.extend(contexts)
 
     async def acreate(
         self,
@@ -249,36 +404,38 @@ class GoogleAIModel(BaseChatModel):
         return_response_object: bool = False,
         return_generated_thread: bool = False,
     ) -> Thread:
-
-        native_contents, configs, thread = await self.prepare_config(
-            user_input, base_thread=base_thread
-        )
-        self.logger.info(f"Sending Google API Request with Configs: {configs}")
-
         try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=native_contents,
-                config=configs,
+            native_contents, configs, thread = await self.prepare_config(
+                user_input, base_thread=base_thread
             )
-        except Exception as e:
-            raise ModelServiceError(e) from e
+            self.logger.info(f"Sending Google API Request with Configs: {configs}")
 
-        self.logger.info(
-            f"Model API Request Completed. Usage: {getattr(response, 'usage_metadata', {})}"
-        )
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=self.model,
+                    contents=native_contents,
+                    config=configs,
+                )
+            except Exception as e:
+                raise ModelServiceError(e) from e
 
-        if return_response_object is True:
-            return response
+            self.logger.info(
+                f"Model API Request Completed. Usage: {getattr(response, 'usage_metadata', {})}"
+            )
 
-        await self.add_response_to_thread(thread, response)
+            if return_response_object is True:
+                return response
 
-        if base_thread is not None:
-            await base_thread.extend_thread(thread=thread)
-        else:
-            base_thread = thread
+            await self.add_response_to_thread(thread, response)
 
-        if return_generated_thread is True:
-            return thread
+            if base_thread is not None:
+                await base_thread.extend(thread=thread)
+            else:
+                base_thread = thread
 
-        return base_thread
+            if return_generated_thread is True:
+                return thread
+
+            return base_thread
+        finally:
+            await self.aclear_registries()

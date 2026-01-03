@@ -1,6 +1,5 @@
 import asyncio
 import os
-import socket
 import subprocess
 import tempfile
 from enum import Enum
@@ -142,24 +141,10 @@ class CodeGenHelper:
             except (FileNotFoundError, PermissionError):
                 pass
 
-
-def _is_port_open(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.2)
-        try:
-            sock.connect((host, port))
-            return True
-        except OSError:
-            return False
-
-
 async def code_execution_tool(
     language: CodeLanguage,
     code: str,
-    timeout: int,
-    start_server: bool = False,
-    server_host: str = "127.0.0.1",
-    server_port: int = 3000,
+    timeout: int
 ) -> List[Any]:
     """
     Execute code in various programming languages and return formatted results.
@@ -200,73 +185,6 @@ async def code_execution_tool(
         raise UnsupportedLanguageError(
             f"Unsupported language '{lang_str}'. Supported languages: {supported}"
         ) from e
-
-    # If requested, start a long-running server in background and emit URL
-    if start_server:
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                suffix=CodeGenHelper.get_file_extension(lang),
-                delete=False,
-            ) as temp_file:
-                temp_file.write(code)
-                temp_file_path = temp_file.name
-
-            execution_commands = {
-                CodeLanguage.PYTHON: ["python3", temp_file_path],
-                CodeLanguage.JAVASCRIPT: ["node", temp_file_path],
-                CodeLanguage.TYPESCRIPT: ["npx", "tsx", temp_file_path],
-                CodeLanguage.SHELL: ["bash", temp_file_path],
-                CodeLanguage.GO: ["go", "run", temp_file_path],
-            }
-
-            if lang not in execution_commands:
-                raise UnsupportedLanguageError(
-                    f"Server start not supported for {lang.value}"
-                )
-
-            # Start background process
-            log_dir = tempfile.mkdtemp(prefix="neo-codegen-")
-            stdout_path = os.path.join(log_dir, "stdout.log")
-            stderr_path = os.path.join(log_dir, "stderr.log")
-            stdout_f = open(stdout_path, "wb")
-            stderr_f = open(stderr_path, "wb")
-
-            process = subprocess.Popen(
-                execution_commands[lang],
-                cwd=os.path.dirname(temp_file_path),
-                stdout=stdout_f,
-                stderr=stderr_f,
-                start_new_session=True,
-            )
-
-            # Best-effort readiness wait
-            total_wait = 0.0
-            while total_wait < 5.0:
-                if _is_port_open(server_host, server_port):
-                    break
-                await asyncio.sleep(0.2)
-                total_wait += 0.2
-
-            server_url = f"http://{server_host}:{server_port}"
-            summary = (
-                f"Started server (pid {process.pid})\n"
-                f"Language: {lang.value}\n"
-                f"Command: {' '.join(execution_commands[lang])}\n"
-                f"Logs: {stdout_path} (stdout), {stderr_path} (stderr)\n"
-                f"URL: {server_url}\n"
-                f'NEO_SIGNAL: {{"type": "open_url", "url": "{server_url}", "target": "browser"}}'
-            )
-
-            return [TextContent(data=summary)]
-        except (
-            OSError,
-            ValueError,
-            RuntimeError,
-            UnicodeError,
-            subprocess.SubprocessError,
-        ) as e:
-            raise CodeExecutionError(f"Failed to start server: {str(e)}") from e
 
     # Execute code - exceptions will bubble up
     result = await CodeGenHelper.execute_code(code, lang, timeout)

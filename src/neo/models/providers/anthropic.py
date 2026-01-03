@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from neo.contexts.context import Context
 from neo.contexts.thread import Thread
-from neo.models.providers.base import BaseChatModel
+from neo.models.base import BaseChatModel
 from neo.tools import BaseTool, Tool
 from neo.types.contents import (
     AudioTextContent,
@@ -21,8 +21,9 @@ from neo.types.contents import (
     ThoughtContent,
     ToolInputContent,
     ToolOutputContent,
+    StructuredContent
 )
-from neo.types.errors import ModelServiceError, ToolError
+from neo.types.errors import ModelServiceError, ToolError, ModelConfigError
 from neo.types.modalities import Modality
 from neo.types.roles import Role
 from neo.utils.file_handling import (
@@ -107,7 +108,15 @@ class AnthropicModel(BaseChatModel):
         self, context: Context | List, add_role: bool = True
     ) -> dict:
         prompt = []
-        contents = context.contents if isinstance(context, Context) else context
+        is_provider_context = False
+        
+        if isinstance(context, Context):
+            contents = context.contents
+            
+            # detect if the same provider's context
+            is_provider_context = context.provider_name == __class__.__name__
+        else:
+            contents = context
 
         for c in contents:
 
@@ -125,19 +134,18 @@ class AnthropicModel(BaseChatModel):
                         t["source"]["url"] = c.data
 
                 case ToolInputContent():
-                    t = copy.deepcopy(self.PROMPT_TEMPLATE["tool_input"])
-                    t["input"] = c.params
-                    t["id"] = c.tool_use_id
-                    t["name"] = c.tool_name
+                    # treat as a text prompt if other provider context
+                    if is_provider_context:
+                        t = c.raw_data
+                    else:
+                        t = self._create_text_prompt(f"<Tool Input>: {str(c.raw_data)}")
 
                 case ToolOutputContent():
-                    t = copy.deepcopy(self.PROMPT_TEMPLATE["tool_output"])
-                    p = await self.context_to_prompt(c.contents, add_role=False)
-                    t["content"] = p
-                    t["tool_use_id"] = t["tool_use_id"].format(
-                        tool_use_id=c.tool_use_id
-                    )
-                    t["is_error"] = c.is_error
+                    # treat as a text prompt if other provider context
+                    if is_provider_context:
+                        t = c.raw_data
+                    else:
+                        t = self._create_text_prompt(f"<Tool Output>: {str(c.raw_data)}")
 
                 case DocumentContent():
                     if isinstance(c.data, bytes):
@@ -189,12 +197,19 @@ class AnthropicModel(BaseChatModel):
                         text_data = text_data.data
                         c.text = text_data
                     t = self._create_text_prompt(text_data)
+                    
+                case ThoughtContent():
+                    if is_provider_context:
+                        t = c.raw_data
+                    else:
+                        t = self._create_text_prompt(f"<Thought Content>: {str(c.raw_data)}")
 
                 case RawContent():
                     t = c.data
 
                 case _:
-                    t = self._create_text_prompt(str(c))
+                    _str = str(c) if not hasattr(c, "data") else str(c.data)
+                    t = self._create_text_prompt(_str)
 
             prompt.append(t)
 
@@ -262,13 +277,6 @@ class AnthropicModel(BaseChatModel):
                 "No max_tokens provided, using default value of 2048 since Anthropic requires `max_tokens` parameter."
             )
 
-        # Add thinking configuration if enabled
-        if self.enable_thinking:
-            configs["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": self.thinking_budget_tokens,
-            }
-
         return messages, configs, thread
 
     @staticmethod
@@ -324,6 +332,7 @@ class AnthropicModel(BaseChatModel):
                 # Handle thinking content from Anthropic
                 thinking_text = getattr(item, "thinking", None)
                 self.logger.thinking(thinking_text)
+                contents.append(ThoughtContent(raw_data=item))
 
             elif item.type == "server_tool_use":
                 # Handle server tool use - log the tool invocation
@@ -351,24 +360,36 @@ class AnthropicModel(BaseChatModel):
             elif item.type == "tool_use":
                 # handle structured response differently
                 if self.boolean_response is True:
-                    self.structured_response_model = BooleanContent
+                    content = BooleanContent(**item.input)
+                    contents.append(content)
 
-                if self.structured_response_model is not None:
+                elif self.structured_response_model is not None:
                     # handle structured response
                     params = item.input
                     # check params
-                    self.structured_response_model(**params)
-                    content = TextContent(data=json.dumps(params))
+                    content = self.structured_response_model(**params)
+                    content = StructuredContent(data=content)
                     contents.append(content)
+                    
                 else:
                     tool_input = ToolInputContent(
-                        params=item.input, tool_name=item.name, tool_use_id=item.id
+                        raw_data=item,
                     )
                     contents.append(tool_input)
 
                     # handle tool call if auto_tool_run is enabled
                     if self.auto_tool_run:
-                        tool_output = await self.handle_single_tool_response(tool_input)
+                        output, is_error = await self.handle_single_tool_response(tool_name=item.name, params=item.input)
+                        
+                        # package tool output
+                        tool_output = copy.deepcopy(self.PROMPT_TEMPLATE["tool_output"])
+                        tool_output["tool_use_id"] = item.id
+                        tool_output["content"] = await self.context_to_prompt(context=output, add_role=False)
+                        tool_output["is_error"] = is_error
+                        
+                        tool_output = ToolOutputContent(
+                            raw_data=tool_output,
+                        )
 
             else:
                 raise TypeError(f"Unsupported API response content type: {item.type}")
@@ -378,7 +399,7 @@ class AnthropicModel(BaseChatModel):
         c = Context(
             contents=contents,
             provider_role=Role.ASSISTANT,
-            provider_name=self.model,
+            provider_name=__class__.__name__,
             provider_context_id=_id,
         )
         contexts.append(c)
@@ -387,11 +408,16 @@ class AnthropicModel(BaseChatModel):
             c = Context(
                 contents=tool_output,
                 provider_role=Role.USER,
+                provider_name=__class__.__name__,
             )
             contexts.append(c)
+        
+        # add raw response to contexts
+        for c in contexts:
+            c.raw_response = response
 
         # add to thread
-        await thread.append_contexts(contexts)
+        await thread.extend(contexts)
 
     async def acreate(
         self,
@@ -437,7 +463,7 @@ class AnthropicModel(BaseChatModel):
             await self.add_response_to_thread(thread=thread, response=response)
 
             if base_thread is not None:
-                await base_thread.extend_thread(thread=thread)
+                await base_thread.extend(thread=thread)
             else:
                 base_thread = thread
 

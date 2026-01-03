@@ -5,7 +5,7 @@ from typing import Dict, List, Set
 
 from neo.agentic.instruction import ModelConfigs
 from neo.agentic.model_registry import ModelRegistry
-from neo.agentic.task import Task, TaskStatus
+from neo.agentic.task import ModelTask, TaskStatus, BaseTask, FunctionTask
 from neo.agentic.tool_registry import ToolRegistry
 from neo.contexts import Context, Thread
 from neo.types.contents import ToolOutputContent
@@ -19,11 +19,11 @@ class Neo:
 
     def __init__(
         self,
-        tasks: List[Task] | Task = None,
+        tasks: List[BaseTask] | BaseTask = None,
         default_model_configs: ModelConfigs = None,
         max_tool_execution_rounds: int = 5,
         default_user_input: str = "continue",
-        model_registry_fuzzy_mode: bool = False,
+        model_registry_fuzzy_mode: bool = True,
     ) -> None:
         """
         A class to manage the execution of tasks in a directed acyclic graph (DAG).
@@ -72,7 +72,7 @@ class Neo:
         self.default_user_input = default_user_input
         self.model_registry_fuzzy_mode = model_registry_fuzzy_mode
 
-        self.tasks: Dict[str, Task] = {}
+        self.state: Dict[str, BaseTask] = {}
         self.head_task_ids: Set[str] = set()
         self.end_task_ids: Set[str] = set()
         self.in_degree: Dict[str, int] = defaultdict(int)
@@ -80,7 +80,7 @@ class Neo:
 
         self._init_tasks(tasks)
 
-    def _init_tasks(self, tasks: List[Task] | Task) -> Dict[str, Task]:
+    def _init_tasks(self, tasks: List[BaseTask] | BaseTask) -> Dict[str, BaseTask]:
         """
         Initializes the task manager with a list of task heads or a single task head.
 
@@ -94,7 +94,7 @@ class Neo:
         Dict[str, Task]
             A dictionary mapping task IDs to Task objects.
         """
-        if isinstance(tasks, Task):
+        if isinstance(tasks, BaseTask):
             tasks = [tasks]
 
         # get head tasks and check for cyclic dependencies
@@ -102,18 +102,18 @@ class Neo:
         for task in tasks:
             dependent_tasks.update(self._register_and_fetch_dependents(task))
 
-        self.head_task_ids = self.tasks.keys() - dependent_tasks
+        self.head_task_ids = self.state.keys() - dependent_tasks
         if not self.head_task_ids:
             raise ValueError("No head tasks found; possible cyclic dependency exists.")
 
         self.logger.info(
-            f"Head tasks: {tuple(str(self.tasks[i]) for i in self.head_task_ids)}"
+            f"Head tasks: {tuple(str(self.state[i]) for i in self.head_task_ids)}"
         )
 
         # Build the graph in a single optimized pass
         self._build_graph()
 
-        end_tasks = [str(self.tasks[task_id]) for task_id in self.end_task_ids]
+        end_tasks = [str(self.state[task_id]) for task_id in self.end_task_ids]
         self.logger.info(f"End tasks: {', '.join(end_tasks)}")
 
         # Warn if graph doesn't converge to single task
@@ -123,7 +123,7 @@ class Neo:
             )
 
     def _register_and_fetch_dependents(
-        self, task: Task, visited: Set[str] = None
+        self, task: BaseTask, visited: Set[str] = None
     ) -> Set[str]:
         """recursively get all dependent tasks with cycle detection"""
         if visited is None:
@@ -136,14 +136,21 @@ class Neo:
             )
 
         visited.add(task.id)
-        self.tasks[task.id] = task
+        
+        # Check for duplicate task IDs (different task objects with same ID)
+        if task.id in self.state and self.state[task.id] is not task:
+            raise ValueError(
+                f"Duplicate task ID detected: '{task.id}' is used by multiple tasks. "
+                f"Task IDs must be unique across the entire task graph."
+            )
+        self.state[task.id] = task
 
         if task.subsequent_tasks is None:
             visited.remove(task.id)  # Backtrack
             return set()
 
         dependent_tasks = set()
-        for dep in task.subsequent_tasks:
+        for dep in task.list_subsequent_tasks():
             dependent_tasks.add(dep.id)
             dependent_tasks.update(self._register_and_fetch_dependents(dep, visited))
 
@@ -162,9 +169,9 @@ class Neo:
 
         # Process each head task
         for task_id in self.head_task_ids:
-            self._process_task(self.tasks[task_id], processed)
+            self._process_task(self.state[task_id], processed)
 
-    def _process_task(self, task: Task, processed: set) -> None:
+    def _process_task(self, task: BaseTask, processed: set) -> None:
         """Process a single task: validate, calculate in-degrees."""
         # Skip if already processed (shared task from another head)
         if task.id in processed:
@@ -178,14 +185,14 @@ class Neo:
 
         # Process dependencies and calculate in-degrees
         if task.subsequent_tasks is not None:
-            for dep in task.subsequent_tasks:
+            for dep in task.list_subsequent_tasks():
                 self.in_degree[dep.id] += 1  # Calculate in-degree as we go
                 self._process_task(dep, processed)
         else:
             # Leaf node - add as end task
             self.end_task_ids.add(task.id)
 
-    def create_model_for_task(self, task: Task):
+    def create_model_for_task(self, task: ModelTask):
         """
         Create a model instance configured for the given task.
 
@@ -255,18 +262,26 @@ class Neo:
 
         configs = model_configs.model_dump(exclude={"model"}, exclude_none=True)
 
-        return self.model_registry.create_model(
+        model = self.model_registry.create_model(
             model=model_configs.model,
             instruction=system_instruction,
             configs=configs,
+            fuzzy_mode=self.model_registry_fuzzy_mode,
             **kwargs,
         )
+        
+        task.done_by = model  # Track which model was used to complete the task
+        return model
 
-    def _validate_task_tools(self, task: Task) -> None:
+    def _validate_task_tools(self, task: BaseTask) -> None:
         """
         Validates that all tools specified in task's other_configs exist in the tool registry
         for the configured model.
         """
+        # Skip validation for non-ModelTask tasks
+        if not isinstance(task, ModelTask):
+            return
+
         if task.instruction is None or task.instruction.other_configs is None:
             return
 
@@ -282,7 +297,7 @@ class Neo:
                 f"{tools} without knowing the target model."
             )
 
-        entry = self.model_registry.get_model_registry(model_configs.model)
+        entry = self.model_registry.get_model_registry(model_configs.model, fuzzy_mode=self.model_registry_fuzzy_mode)
         model_class = entry["class"]
 
         # Validate each tool exists in registry
@@ -297,7 +312,7 @@ class Neo:
                 ) from e
 
     async def run_single_task(
-        self, task: Task, thread: Thread, start_fresh: bool
+        self, task: BaseTask, thread: Thread, start_fresh: bool
     ) -> None:
         """
         Executes a single task.
@@ -309,11 +324,36 @@ class Neo:
             if start_fresh is False:
                 # use deliverable if available
                 if task.deliverable is not None:
-                    await thread.extend_thread(task.deliverable)
+                    await thread.extend(task.deliverable)
                     if task.status != TaskStatus.COMPLETED:
                         task.status = TaskStatus.COMPLETED
                     self.logger.info(f"Task {task} already completed.")
                     return
+
+            # Handle FunctionTask
+            if isinstance(task, FunctionTask):
+                # Execute the callable with state dict
+                if asyncio.iscoroutinefunction(task.func):
+                    result = await task.func(self.state)
+                else:
+                    result = task.func(self.state)
+
+                # Validate result is a Context
+                if not isinstance(result, Context):
+                    raise TaskRuntimeError(
+                        f"Task {task} callable must return a Context object, got {type(result).__name__}"
+                    )
+
+                # Wrap in Thread and store as deliverable
+                task.deliverable = Thread(contexts=[result])
+
+                # Update shared thread
+                await thread.extend(task.deliverable)
+
+                # Mark as completed
+                task.status = TaskStatus.COMPLETED
+                self.logger.info(f"Task {task} completed.")
+                return
 
             # Create isolated thread fork for this task to prevent race conditions
             task.base_thread_snapshot = await thread.afork()
@@ -323,60 +363,54 @@ class Neo:
 
             # run the task with model, handling tool execution rounds
             round_count = 0
-            generated_thread = Thread()
-
-            last_context_is_user = False
-            if len(task_thread) > 0:
-                last_context_is_user = (
-                    task_thread.get_context(-1).provider_role == Role.USER
-                )
+            task.unfinished_deliverable = Thread()
 
             while round_count < self.max_tool_execution_rounds:
                 round_count += 1
                 self.logger.debug(f"Task {task} round {round_count}")
 
-                # Use default_user_input if task.user_input is None to prevent empty responses
+                # Use default_user_input if user_input is None and the last context is not user to prevent empty responses
+                last_context_is_user = False
+                if len(task_thread) > 0:
+                    last_context_is_user = (
+                        task_thread.get(-1).provider_role == Role.USER
+                    )
+
                 user_input_for_round = task.user_input if round_count == 1 else None
-                if (
-                    user_input_for_round is None
-                    and round_count == 1
-                    and not last_context_is_user
-                ):
+                if user_input_for_round is None and not last_context_is_user:
                     user_input_for_round = self.default_user_input
 
-                output_thread = await model.acreate(
+                _ = await model.acreate(
                     user_input=user_input_for_round,
                     base_thread=task_thread,
                     return_generated_thread=True,
                 )
 
                 # Check for empty response thread and error out
-                if len(output_thread) == 0:
+                if len(task_thread) == 0:
                     raise TaskRuntimeError(
                         f"Task {task} received empty response from model in round {round_count}. "
                         f"This may indicate the conversation ended with assistant message or model refused to respond."
                     )
 
                 # Check if the response thread has contexts with no contents
-                for context in output_thread:
+                for context in task_thread:
                     if not context.contents:
                         raise TaskRuntimeError(
                             f"Task {task} received context with no contents in round {round_count}. "
                             f"This indicates an invalid response from the model."
                         )
 
-                # Collect all generated contexts from this round
-                await generated_thread.extend_thread(output_thread)
+                # refresh the unfinished deliverable
+                task.unfinished_deliverable = task_thread
 
                 # Check if the last context has tool output content
-                if len(output_thread) > 0:
-                    last_context = output_thread.get_context(-1)
-                    if last_context.contents and len(last_context.contents) > 0:
-                        last_content = last_context.contents[-1]
-                        if isinstance(last_content, ToolOutputContent):
-                            # Continue the conversation for tool execution
-                            await task_thread.extend_thread(output_thread)
-                            continue
+                last_context = await task_thread.aget(-1)
+                if last_context.contents and len(last_context.contents) > 0:
+                    last_content = last_context.contents[-1]
+                    if isinstance(last_content, ToolOutputContent):
+                        # Continue the conversation for tool execution
+                        continue
 
                 # No tool output found, task completed
                 break
@@ -388,10 +422,11 @@ class Neo:
                 )
 
             # Create deliverable with all generated contexts from all rounds
-            task.deliverable = generated_thread
+            task.deliverable = task.unfinished_deliverable
+            task.unfinished_deliverable = None
 
             # Update shared thread for task handshaking
-            await thread.extend_thread(task.deliverable)
+            await thread.extend(task.deliverable)
 
             # Mark task as completed
             task.status = TaskStatus.COMPLETED
@@ -424,7 +459,7 @@ class Neo:
             )
 
         in_degree = copy.deepcopy(self.in_degree)
-        ready = [self.tasks[task_id] for task_id in self.head_task_ids]
+        ready = [self.state[task_id] for task_id in self.head_task_ids]
 
         if base_thread is None:
             if initial_user_input is not None:
@@ -466,27 +501,41 @@ class Neo:
                 for task in ready:
                     # Update in-degree of dependent tasks and prepare new ready tasks.
                     if task.subsequent_tasks is not None:
-                        for dep in task.subsequent_tasks:
+                        sub_tasks = []
+                        
+                        if isinstance(task.subsequent_tasks, dict):
+                            # check deliverable to determine which task to trigger
+                            if task.deliverable is not None and len(task.deliverable) > 0:
+                                last_context = await task.deliverable.aget(-1)
+                                if (
+                                    last_context.contents
+                                    and len(last_context.contents) > 0
+                                ):
+                                    last_content = last_context.contents[-1]
+                                    
+                                    # for TextContent or BooleanContent, we cast `data` to str
+                                    trigger_key = str(last_content.data) if hasattr(last_content, "data") else str(last_content)
+                                    if trigger_key in task.subsequent_tasks:
+                                        sub_tasks.append(
+                                            task.subsequent_tasks[trigger_key]
+                                        )
+                        else:
+                            sub_tasks = task.subsequent_tasks
+                            
+                        for dep in sub_tasks:
                             in_degree[dep.id] -= 1
                             if in_degree[dep.id] == 0:
                                 new_ready.append(dep)
 
                 ready = new_ready
 
-            # Check for uncompleted tasks—this would indicate a cyclic dependency.
-            uncompleted_tasks = [
-                task_id
-                for task_id, task in self.tasks.items()
-                if task.status != TaskStatus.COMPLETED
-            ]
-            if uncompleted_tasks:
-                raise ValueError(f"Tasks not completed: {set(uncompleted_tasks)}")
-
             return base_thread
 
         except Exception as e:
             self.logger.error(f"Error during task execution: {str(e)}")
             raise
+        finally:
+            return base_thread
 
     def display_dependencies(self) -> str:
         """
@@ -508,12 +557,12 @@ class Neo:
         result_lines = []
         # Process each head task (tasks without upstream dependencies)
         for head_id in self.head_task_ids:
-            head_task = self.tasks[head_id]
+            head_task = self.state[head_id]
             result_lines.extend(dfs(head_task, []))
 
         print("\n".join([f"- {line}" for line in result_lines]))
 
-    def get_task_by_id(self, task_id: str) -> Task | None:
+    def get_task_by_id(self, task_id: str) -> BaseTask | None:
         """
         Get a task by its ID.
 
@@ -523,11 +572,7 @@ class Neo:
         Returns:
             Task | None: The Task object if found, otherwise None.
         """
-        if len(task_id) > Task.SHORT_ID_LENGTH:
-            return self.tasks.get(task_id)
-        return next(
-            (task for task in self.tasks.values() if task.id.endswith(task_id)), None
-        )
+        return self.state.get(task_id)
 
     def get_task_status_summary(self) -> dict:
         """
@@ -539,14 +584,14 @@ class Neo:
         status_counts = {status.value: 0 for status in TaskStatus}
         tasks_by_status = {status.value: [] for status in TaskStatus}
 
-        for task in self.tasks.values():
+        for task in self.state.values():
             status_counts[task.status.value] += 1
             tasks_by_status[task.status.value].append(task)
 
         return {
             "counts": status_counts,
             "tasks": tasks_by_status,
-            "total_tasks": len(self.tasks),
+            "total_tasks": len(self.state),
         }
 
     def display_task_status(self) -> None:

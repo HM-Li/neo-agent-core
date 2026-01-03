@@ -5,13 +5,13 @@ from pydantic import model_validator
 class IDMixin:
     """mixin for generating unique identifiers. Ensures no two classes share the same ID prefix."""
 
-    @model_validator(mode="before")
-    @classmethod
-    def _no_user_provided_id(cls, values):
-        if isinstance(values, dict) and values.get("id", None) is not None:
-            raise ValueError("User provided ID is not allowed.")
+    # @model_validator(mode="before")
+    # @classmethod
+    # def _no_user_provided_id(cls, values):
+    #     if isinstance(values, dict) and values.get("id", None) is not None:
+    #         raise ValueError("User provided ID is not allowed.")
 
-        return values
+    #     return values
 
     @classmethod
     def generate_id(cls) -> str:

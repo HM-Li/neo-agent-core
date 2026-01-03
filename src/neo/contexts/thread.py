@@ -1,6 +1,5 @@
 # %%
 import asyncio
-import json
 import pprint
 from collections import deque
 from typing import List
@@ -14,7 +13,38 @@ LOGGER = get_logger("Thread")
 
 
 class Thread:
-    """A thread is a collection of contexts. A model can turn a thread into it's own API format, such as openai chat completion messages."""
+    """A thread is a collection of contexts. A model can turn a thread into it's own API format, such as openai chat completion messages.
+
+    Thread Safety
+    -------------
+    This class uses an asyncio.Lock for thread-safe concurrent access.
+
+    Async-safe methods (use lock):
+        - append() : Add a context to the end
+        - extend() : Extend with another thread or list of contexts
+        - appendleft() : Add a context to the beginning
+        - popleft() : Remove and return the first context
+        - pop() : Remove and return the last context
+        - aget() : Get a context at a specific index
+        - afork() : Create a new thread with a copy of contexts
+        - __aiter__() : Async iteration over contexts
+
+    NOT async-safe methods (no lock):
+        - get() : Direct index access without lock
+        - __getitem__() : Indexing syntax (e.g., thread[0])
+        - __iter__() : Sync iteration over contexts
+        - __len__() : Get thread length
+        - is_empty() : Check if thread is empty
+        - last_context_time : Property access
+        - participants : Property access
+        - display() : Display thread contents
+        - dumps() : Serialize to string
+        - dump() : Serialize to file
+
+    Use async-safe methods when multiple coroutines may be concurrently modifying
+    the thread. The non-async-safe methods are provided for convenience in single-
+    threaded or read-only scenarios.
+    """
 
     def __init__(self, contexts: List[Context] | Context | str = None):
         self._contexts = deque([], maxlen=100)
@@ -25,7 +55,7 @@ class Thread:
 
             # Add contexts synchronously in constructor
             for context in contexts:
-                self._append_context(context)
+                self._append(context)
 
     def __iter__(self):
         """Iterate over the contexts in the thread."""
@@ -38,7 +68,7 @@ class Thread:
         for context in snapshot:
             yield context
 
-    async def aget_context(self, index: int):
+    async def aget(self, index: int):
         async with self._lock:
             snapshot = list(self._contexts)
         try:
@@ -46,7 +76,7 @@ class Thread:
         except IndexError as e:
             raise IndexError("Context index out of range.") from e
 
-    def get_context(self, index: int):
+    def get(self, index: int):
         """Get a context at a specific index."""
         try:
             return self._contexts[index]
@@ -67,16 +97,7 @@ class Thread:
             return self._contexts[-1].time_provided
         return None
 
-    async def append_contexts(self, contexts: List[Context]):
-        """Add a list of contexts to the thread."""
-        if not isinstance(contexts, list):
-            raise TypeError("contexts must be a list of Context objects.")
-
-        async with self._lock:
-            for context in contexts:
-                self._append_context(context)
-
-    def _append_context(self, context: Context | str):
+    def _append(self, context: Context | str):
         """Append a context to the end of the thread.
 
         Parameters
@@ -102,7 +123,7 @@ class Thread:
 
         self._contexts.append(context)
 
-    async def append_context(self, context: Context | str):
+    async def append(self, context: Context | str):
         """Append a context to the end of the thread.
 
         Parameters
@@ -111,29 +132,32 @@ class Thread:
             if str, will be converted to a context with an alternative role
         """
         async with self._lock:
-            self._append_context(context)
+            self._append(context)
 
-    async def extend_thread(self, thread: "Thread"):
+    async def extend(self, thread: "Thread" | List[Context]):
         """Extend the thread with another thread."""
         # First get all contexts from the source thread
-        contexts = []
-        async for context in thread:
-            contexts.append(context)
+        if isinstance(thread, list):
+            contexts = thread
+        else:
+            contexts = []
+            async for context in thread:
+                contexts.append(context)
 
         # Then add them all under a single lock
         async with self._lock:
             for context in contexts:
-                self._append_context(context)
+                self._append(context)
 
-    async def add_context_to_beginning(self, context: Context):
+    async def appendleft(self, context: Context):
         async with self._lock:
             self._contexts.appendleft(context)
 
-    async def pop_context_from_beginning(self) -> Context:
+    async def popleft(self) -> Context:
         async with self._lock:
             return self._contexts.popleft()
 
-    async def pop_context_from_end(self) -> Context:
+    async def pop(self) -> Context:
         async with self._lock:
             return self._contexts.pop()
 
@@ -143,6 +167,10 @@ class Thread:
             new_thread = Thread()
             new_thread._contexts = deque(self._contexts)
             return new_thread
+        
+    def __getitem__(self, index: int):
+      """Get a context at a specific index using [] syntax."""
+      return self.get(index)
 
     @property
     def participants(self):
@@ -154,10 +182,10 @@ class Thread:
         return participants
 
     def __repr__(self):
-        return f"Thread({len(self._contexts)} contexts)"
+        return pprint.pformat(self._contexts)
 
     def __str__(self):
-        return pprint.pformat(self._contexts)
+        return f"Thread({len(self._contexts)} contexts)"
 
     def display(self):
         if not self._contexts:

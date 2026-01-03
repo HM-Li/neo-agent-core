@@ -6,7 +6,7 @@ import uuid
 from neo.contexts import Thread, Context
 from neo.types import contents as C
 from neo.types.roles import Role
-from neo.agentic import Neo, Task, Instruction, ModelConfigs, OtherConfigs
+from neo.agentic import Neo, ModelTask, Instruction, ModelConfigs, OtherConfigs
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def basic_instruction():
 
 @pytest.fixture
 def basic_task(basic_instruction):
-    return Task(
+    return ModelTask(
         user_input="What is the capital of France?", instruction=basic_instruction
     )
 
@@ -43,9 +43,9 @@ def test_task_creation(mock_uuid):
     mock_uuid.return_value = uuid.UUID("12345678-1234-5678-1234-567812345678")
 
     instruction = Instruction(content="Be helpful")
-    task = Task(user_input="Hello", instruction=instruction)
+    task = ModelTask(user_input="Hello", instruction=instruction)
 
-    assert task.id == f"task_{_id_str}"
+    assert task.id == f"modeltask_{_id_str}"
     assert isinstance(task.user_input, Context)
     assert task.user_input.contents[0].data == "Hello"
     assert task.instruction == instruction
@@ -93,9 +93,9 @@ def test_other_configs():
 
 
 def test_task_dependencies():
-    task3 = Task(user_input="Task 3")
-    task2 = Task(user_input="Task 2", subsequent_tasks=[task3])
-    task1 = Task(user_input="Task 1", subsequent_tasks=[task2])
+    task3 = ModelTask(user_input="Task 3")
+    task2 = ModelTask(user_input="Task 2", subsequent_tasks=[task3])
+    task1 = ModelTask(user_input="Task 1", subsequent_tasks=[task2])
 
     assert len(task1.subsequent_tasks) == 1
     assert task1.subsequent_tasks[0] == task2
@@ -110,7 +110,7 @@ async def test_neo_run_all(mock_acreate, basic_task, mock_model_response):
 
     # Create Neo instance with tasks
     task1 = basic_task
-    task2 = Task(
+    task2 = ModelTask(
         user_input="What is the population of Paris?",
         instruction=task1.instruction,
         subsequent_tasks=[task1],
@@ -120,3 +120,52 @@ async def test_neo_run_all(mock_acreate, basic_task, mock_model_response):
 
     # Run all tasks
     final_thread = await neo.run_all()
+
+
+@pytest.mark.asyncio
+async def test_function_task():
+    from neo.agentic import FunctionTask
+
+    # Create a function that returns a Context
+    def my_func(state):
+        return Context(contents="Function task executed")
+
+    # Create FunctionTask
+    task = FunctionTask(id="func_task_1", func=my_func)
+
+    # Create Neo instance
+    neo = Neo(tasks=[task])
+
+    # Run the task
+    result_thread = await neo.run_all()
+
+    # Verify task completed
+    from neo.agentic.task import TaskStatus
+    assert task.status == TaskStatus.COMPLETED
+    assert task.deliverable is not None
+    assert len(result_thread) == 1
+
+
+@pytest.mark.asyncio
+async def test_function_task_with_state_access():
+    from neo.agentic import FunctionTask
+    from neo.agentic.task import TaskStatus
+
+    # Create a function that accesses state
+    def aggregator_func(state):
+        task_count = len(state)
+        return Context(contents=f"Total tasks in state: {task_count}")
+
+    # Create tasks
+    task1 = FunctionTask(id="task1", func=lambda s: Context(contents="Task 1"))
+    task2 = FunctionTask(id="task2", func=aggregator_func, subsequent_tasks=[task1])
+
+    # Create Neo instance
+    neo = Neo(tasks=[task1, task2])
+
+    # Run all tasks
+    result_thread = await neo.run_all()
+
+    # Verify both tasks completed
+    assert task1.status == TaskStatus.COMPLETED
+    assert task2.status == TaskStatus.COMPLETED

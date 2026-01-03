@@ -12,7 +12,7 @@ from neo.tools.internal_tools.openai import WebSearch as OpenAIWebSearch
 from neo.tools.internal_tools.anthropic import WebSearch as AnthropicWebSearch
 from neo.types.modalities import Modality
 
-from neo.agentic import Neo, Task, Instruction, ModelConfigs, OtherConfigs
+from neo.agentic import Neo, ModelTask, Instruction, ModelConfigs, OtherConfigs
 from neo.types.tool_codes import StandardToolCode
 
 
@@ -214,7 +214,7 @@ class TestToolCodeResolution:
             )
         )
         
-        task = Task(user_input="Hello", instruction=instruction)
+        task = ModelTask(user_input="Hello", instruction=instruction)
         neo = Neo(tasks=[task])
         
         # Should not raise an exception
@@ -235,7 +235,7 @@ class TestToolCodeResolution:
             )
         )
         
-        task = Task(user_input="Hello", instruction=instruction)
+        task = ModelTask(user_input="Hello", instruction=instruction)
         neo = Neo(tasks=[task])
         
         # Should not raise an exception
@@ -256,7 +256,7 @@ class TestToolCodeResolution:
             )
         )
         
-        task = Task(user_input="Hello", instruction=instruction)
+        task = ModelTask(user_input="Hello", instruction=instruction)
         neo = Neo(tasks=[task])
         
         # Should not raise an exception
@@ -274,7 +274,7 @@ class TestToolCodeResolution:
             )
         )
         
-        task = Task(user_input="Hello", instruction=instruction)
+        task = ModelTask(user_input="Hello", instruction=instruction)
         neo = Neo(tasks=[task])
         
         # Should not raise an exception
@@ -289,7 +289,7 @@ class TestToolCodeResolution:
             other_configs=OtherConfigs(timeaware=False)
         )
         
-        task = Task(user_input="Hello", instruction=instruction)
+        task = ModelTask(user_input="Hello", instruction=instruction)
         neo = Neo(tasks=[task])
         
         # Should not raise an exception
@@ -306,7 +306,7 @@ class TestToolCodeResolution:
             )
         )
         
-        task = Task(user_input="Hello", instruction=instruction)
+        task = ModelTask(user_input="Hello", instruction=instruction)
         neo = Neo(tasks=[task])
         
         # Should not raise an exception
@@ -328,7 +328,7 @@ class TestToolCodeResolution:
             )
         )
         
-        task = Task(user_input="Hello", instruction=instruction)
+        task = ModelTask(user_input="Hello", instruction=instruction)
         neo = Neo(tasks=[task])
         
         # Should not raise an exception

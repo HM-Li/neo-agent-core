@@ -30,6 +30,16 @@ class Context(BaseModel, IDMixin):
         default_factory=get_current_utc_timestamp,
         description="The time the context was provided in ISO 8601 format.",
     )
+    raw_response: Optional[Any] = Field(
+        default=None,
+        description=(
+            "The raw response from the model or tool that generated this context. "
+            "This can be useful for debugging or auditing purposes."
+            "A raw response can correspond to multiple contexts. "
+        ),
+        exclude=True,
+        repr=False,
+    )
 
     @field_validator("contents", mode="before")
     @classmethod
@@ -51,12 +61,14 @@ class Context(BaseModel, IDMixin):
             return Role(provider_role)
         return provider_role
 
-    def _display_contents(self) -> str:
+    def _display_contents(self, verbose: bool = False) -> str:
         def display(c):
             match c:
                 case TextContent() | RawContent():
-                    return c.data
+                    return f"\"{c.data}\""
                 case BaseContent():
+                    if verbose:
+                        return repr(c)
                     return f"<Type: {c.type}>"
                 case _:
                     return str(c)
@@ -65,7 +77,7 @@ class Context(BaseModel, IDMixin):
         return ", ".join(contents)
 
     def __repr__(self):
-        contents = self._display_contents()
+        contents = self._display_contents(verbose=True)
         return (
             f"Context(\n"
             f"    contents={contents},\n"

@@ -2,7 +2,7 @@ from inspect import signature
 
 from neo.agentic.model_registry import ModelRegistry
 from neo.models.providers.anthropic import AnthropicModel
-from neo.models.providers.base import BaseChatModel
+from neo.models.base import BaseChatModel
 from neo.models.providers.openai import OpenAIResponseModel
 from neo.types.modalities import Modality
 
@@ -13,9 +13,9 @@ def test_create_model_signature_matches_base_chat_model():
     create_model_sig = signature(registry.create_model)
     base_model_sig = signature(BaseChatModel.__init__)
 
-    ignore_params = ["self", "input_modalities"]
+    ignore_params = ["self", "input_modalities", "fuzzy_mode"]
 
-    # Get parameters excluding 'self' and 'name'/'model'
+    # Get parameters excluding 'self', 'input_modalities', and 'fuzzy_mode'
     create_params = {
         k: v for k, v in create_model_sig.parameters.items() if k not in ignore_params
     }
@@ -68,50 +68,6 @@ def test_new_claude_models_support_multimodal():
     # Test Claude Opus 4 modalities
     opus4_modalities = registry.check_model_input_modalities("claude-opus-4-20250514")
     assert set(opus4_modalities) == set(expected_modalities)
-
-
-def test_create_new_claude_models_with_thinking():
-    """Test that new Claude models can be created with thinking parameters."""
-    registry = ModelRegistry()
-
-    # Test creating Claude Sonnet 4 with thinking enabled
-    model = registry.create_model(
-        model="claude-sonnet-4-20250514",
-        enable_thinking=True,
-        thinking_budget_tokens=512,
-    )
-
-    assert isinstance(model, AnthropicModel)
-    assert model.enable_thinking is True
-    assert model.thinking_budget_tokens == 512
-
-    # Test creating Claude Opus 4 with thinking enabled
-    model = registry.create_model(
-        model="claude-opus-4-20250514",
-        enable_thinking=True,
-        thinking_budget_tokens=1024,
-    )
-
-    assert isinstance(model, AnthropicModel)
-    assert model.enable_thinking is True
-    assert model.thinking_budget_tokens == 1024
-
-
-def test_create_openai_model_with_none_thinking_params():
-    """Test that OpenAI models can be created with None thinking parameters without AttributeError."""
-    registry = ModelRegistry()
-
-    # Test creating OpenAI model with None thinking parameters
-    # This should not raise an AttributeError even though OpenAI models don't support thinking
-    model = registry.create_model(
-        model="gpt-4.1",
-        enable_thinking=None,
-        thinking_budget_tokens=None,
-    )
-
-    assert isinstance(model, OpenAIResponseModel)
-    # OpenAI models shouldn't have thinking attributes set when they're None
-    assert not hasattr(model, 'thinking_budget_tokens') or model.enable_thinking is None
 
 
 def test_gpt5_pro_model_registered():

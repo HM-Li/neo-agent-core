@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from neo.contexts import Thread
 from neo.contexts.context import Context
 from neo.mcp.client import MCPClient
-from neo.models.providers.base import BaseChatModel
+from neo.models.base import BaseChatModel
 from neo.tools import BaseTool, Tool
 from neo.types.contents import (
     AudioContent,
@@ -21,10 +21,13 @@ from neo.types.contents import (
     ImageContent,
     RawContent,
     TextContent,
+    ThoughtContent,
     ToolInputContent,
     ToolOutputContent,
+    BaseContent,
+    StructuredContent,
 )
-from neo.types.errors import ContextLengthExceededError, ModelServiceError, ToolError
+from neo.types.errors import ContextLengthExceededError, ModelConfigError, ModelServiceError, ToolError
 from neo.types.roles import Role
 from neo.utils.file_handling import (
     base64_str_to_binary,
@@ -58,6 +61,12 @@ class OpenAICompleteModel(BaseChatModel):
                 "arguments": "{input}",
             },
         },
+        "tool_output": {
+            "type": "function",
+            "tool_call_id": "{call_id}",
+            "name": "{tool_name}",
+            "content": "{output}",
+        },
     }
 
     @property
@@ -69,8 +78,18 @@ class OpenAICompleteModel(BaseChatModel):
         prompt = []
         tool_inputs = []
         extra_message_body = {}
+        is_provider_context = False
+        contents = context
 
-        for c in context.contents:
+        if isinstance(context, Context):
+            contents = context.contents
+
+            # detect if the same provider's context
+            is_provider_context = context.provider_name == __class__.__name__
+        else:
+            contents = context.contents
+
+        for c in contents:
             is_tool_input = False
             match c:
                 case TextContent():
@@ -119,31 +138,28 @@ class OpenAICompleteModel(BaseChatModel):
                     t["input_audio"]["format"] = mime
 
                 case ToolInputContent():
-                    t = copy.deepcopy(self.PROMPT_TEMPLATE["tool_input"])
-                    t["function"]["name"] = c.tool_name
-                    t["function"]["arguments"] = json.dumps(c.params)
-                    t["id"] = c.tool_use_id
-                    is_tool_input = True  # OpenAI completion API treats tool inputs differently from other content types
+                    # treat as raw_data if same provider context
+                    if is_provider_context:
+                        t = c.raw_data
+                        is_tool_input = True  # OpenAI completion API treats tool inputs differently
+                    else:
+                        t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
+                        t["text"] = f"<Tool Input>: {str(c.raw_data)}"
 
                 case ToolOutputContent():
-                    extra_message_body["tool_call_id"] = c.tool_use_id
-
-                    # OpenAI only supports one string output per tool call
-                    if len(c.contents) != 1:
-                        raise ValueError(
-                            "OpenAI only supports one output per tool call for the output."
-                        )
-
-                    output = c.contents[0]
-                    if output is not None:
-                        output = output.data
-
-                    # OpenAI expects the output to be a string
-                    t = str(output)
+                    # treat as raw_data if same provider context
+                    if is_provider_context:
+                        # raw_data contains the tool output dict
+                        raw = c.raw_data
+                        extra_message_body["tool_call_id"] = raw["tool_call_id"]
+                        t = raw["content"]
+                    else:
+                        t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
+                        t["text"] = f"<Tool Output>: {str(c.raw_data)}"
 
                 case _:
                     t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
-                    t["text"] = str(c)
+                    t["text"] = str(c) if not hasattr(c, "data") else str(c.data)
 
             if is_tool_input:
                 tool_inputs.append(t)
@@ -186,13 +202,18 @@ class OpenAICompleteModel(BaseChatModel):
         if cls.is_internal_tool(tool):
             tool_schema = tool.model_dump(exclude_none=True)
         else:
+            # Only use strict mode if all params are required (OpenAI requires this)
+            all_required = (
+                len(tool.params.get("required", [])) == len(tool.params.get("properties", {}))
+            )
+
             tool_schema = {
                 "type": "function",
                 "function": {
                     "name": tool.name,
                     "description": tool.description,
                     "parameters": tool.params,
-                    "strict": True,
+                    "strict": all_required,
                 },
             }
 
@@ -217,7 +238,7 @@ class OpenAICompleteModel(BaseChatModel):
 
         if instruction is not None:
             system_msg = Context(contents=instruction, provider_role=Role.DEVELOPER)
-            await temp_thread.add_context_to_beginning(system_msg)
+            await temp_thread.appendleft(system_msg)
 
         messages = await self.thread_to_prompt(thread=thread, base_thread=temp_thread)
 
@@ -261,17 +282,22 @@ class OpenAICompleteModel(BaseChatModel):
         # Handle text content
         if msg.content:
             if getattr(msg, "parsed", None):
-                result_text = msg.parsed
+                result = msg.parsed
             else:
-                result_text = msg.content
+                result = msg.content
 
-            if not isinstance(result_text, str):
-                result_text = str(result_text)
+            if not isinstance(result, str):
+                if isinstance(result, BooleanContent):
+                    result = result
+                elif isinstance(result, BaseModel):
+                    result = StructuredContent(data=result)
+                else:
+                    result = TextContent(data=str(result))
 
             output_context = Context(
-                contents=TextContent(data=result_text),
+                contents=result,
                 provider_role=Role.ASSISTANT,
-                provider_name=self.model,
+                provider_name=__class__.__name__,
                 provider_context_id=response.id,
             )
             contexts.append(output_context)
@@ -282,40 +308,53 @@ class OpenAICompleteModel(BaseChatModel):
             tool_call_context = Context(
                 contents=[],
                 provider_role=Role.ASSISTANT,
-                provider_name=self.model,
+                provider_name=__class__.__name__,
                 provider_context_id=response.id,
             )
             tool_output_contexts = []
 
             for tool_call in msg.tool_calls:
-                # Create tool input context
+                # Create tool input context with raw API response
                 tool_input_content = ToolInputContent(
-                    tool_name=tool_call.function.name,
-                    tool_use_id=tool_call.id,
-                    params=json.loads(tool_call.function.arguments),
+                    raw_data=tool_call,
                 )
                 tool_call_context.contents.append(tool_input_content)
 
                 # Execute tool and create tool output context if auto_tool_run is enabled
                 if self.auto_tool_run:
-                    tool_output_content = await self.handle_single_tool_response(
-                        content=tool_input_content
+                    params = json.loads(tool_call.function.arguments)
+                    output, is_error = await self.handle_single_tool_response(
+                        tool_name=tool_call.function.name, params=params
+                    )
+
+                    # package tool output using template
+                    tool_output = copy.deepcopy(self.PROMPT_TEMPLATE["tool_output"])
+                    tool_output["tool_call_id"] = tool_call.id
+                    tool_output["name"] = tool_call.function.name
+                    tool_output["content"] = await self.context_to_prompt(context=output, add_role=False)
+
+                    tool_output_content = ToolOutputContent(
+                        raw_data=tool_output,
                     )
                     tool_output_contexts.append(
                         Context(
                             contents=tool_output_content,
                             provider_role=Role.TOOL,
-                            provider_name=None,
+                            provider_name=__class__.__name__,
                             provider_context_id=response.id,
                         )
                     )
             # Add tool call context and tool output contexts to the main contexts
             contexts.append(tool_call_context)
             contexts.extend(tool_output_contexts)
+        
+        # add raw response to contexts
+        for c in contexts:
+            c.raw_response = response
 
         # add response to thread
         if contexts:
-            await thread.append_contexts(contexts)
+            await thread.extend(contexts)
 
     async def acreate(
         self,
@@ -371,7 +410,7 @@ class OpenAICompleteModel(BaseChatModel):
 
             # extend the base thread
             if base_thread is not None:
-                await base_thread.extend_thread(thread=thread)
+                await base_thread.extend(thread=thread)
             else:
                 base_thread = thread
 
@@ -417,27 +456,39 @@ class OpenAIResponseModel(BaseChatModel):
             "output": "{output}",
         },
     }
-
+    
     @property
     def unsupported_params(self) -> List[str]:
-        # OpenAI Response API doesn't support thinking yet
-        return ["enable_thinking", "thinking_budget_tokens"]
+        return []
 
-    async def context_to_prompt(self, context, add_role: bool = True):
+    async def context_to_prompt(self, context: List[BaseContent] | Context, add_role: bool = True):
         """convert context to a user prompt message following the default api template"""
         prompt = []
+        is_provider_context = False
+        is_reasoning = False
+        provider_role = None
+
+        if isinstance(context, Context):
+            contents = context.contents
+
+            # detect if the same provider's context
+            is_provider_context = context.provider_name == __class__.__name__
+            
+            provider_role = context.provider_role
+        else:
+            contents = context
 
         def create_text_block(text_data):
             t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
             t["text"] = text_data
             # input_text vs output_text
-            if context.provider_role == Role.ASSISTANT:
+            if provider_role == Role.ASSISTANT:
                 t["type"] = "output_text"
             else:
                 t["type"] = "input_text"
             return t
 
-        for c in context.contents:
+        for c in contents:
             match c:
                 case TextContent():
                     t = create_text_block(c.data)
@@ -517,41 +568,37 @@ class OpenAIResponseModel(BaseChatModel):
                     t = create_text_block(text_data)
 
                 case ToolInputContent():
-                    t = copy.deepcopy(self.PROMPT_TEMPLATE["tool_input"])
-                    t["call_id"] = c.tool_use_id
-                    t["name"] = c.tool_name
-                    t["arguments"] = json.dumps(c.params)
-
-                    # no role for tool call
-                    add_role = False
+                    # treat as raw_data if same provider context
+                    if is_provider_context:
+                        t = c.raw_data
+                        # no role for tool call
+                        add_role = False
+                    else:
+                        t = create_text_block(f"<Tool Input>: {str(c.raw_data)}")
 
                 case ToolOutputContent():
-                    t = copy.deepcopy(self.PROMPT_TEMPLATE["tool_output"])
-                    t["call_id"] = c.tool_use_id
+                    # treat as raw_data if same provider context
+                    if is_provider_context:
+                        t = c.raw_data
+                        # no role for tool call
+                        add_role = False
+                    else:
+                        t = create_text_block(f"<Tool Output>: {str(c.raw_data)}")
 
-                    # openai only support one string output per tool call
-                    if len(c.contents) != 1:
-                        raise ValueError(
-                            "OpenAI only supports one output per tool call for the output."
-                        )
-
-                    output = c.contents[0]
-
-                    if output is not None:
-                        output = output.data
-
-                    # OpenAI expects the output to be a string
-                    t["output"] = str(output)
-
-                    # no role for tool call
-                    add_role = False
+                case ThoughtContent():
+                    # treat as raw_data if same provider context
+                    if is_provider_context:
+                        t = c.raw_data
+                    else:
+                        t = create_text_block(f"<Thought Content>: {str(c.raw_data)}")
+                    is_reasoning = True # reasoning block is different from other types -- no role layer needed
 
                 case RawContent():
                     t = c.data
 
                 case _:
                     t = copy.deepcopy(self.PROMPT_TEMPLATE["text"])
-                    t["text"] = str(c)
+                    t["text"] = str(c) if not hasattr(c, "data") else str(c.data)
 
                     # input_text vs output_text
                     if context.provider_role == Role.ASSISTANT:
@@ -561,7 +608,7 @@ class OpenAIResponseModel(BaseChatModel):
             prompt.append(t)
 
         # post processing
-        if add_role and context.provider_role != Role.UNDEFINED:
+        if add_role and context.provider_role != Role.UNDEFINED and not is_reasoning:
             prompt = {"role": context.provider_role.value, "content": prompt}
         else:
             # if return the content directly, say for tool call, the content should be a single object
@@ -622,12 +669,17 @@ class OpenAIResponseModel(BaseChatModel):
             tool_schema = tool.model_dump(exclude_none=True)
         else:
             # For regular function tools, wrap in OpenAI function schema
+            # Only use strict mode if all params are required (OpenAI requires this)
+            all_required = (
+                len(tool.params.get("required", [])) == len(tool.params.get("properties", {}))
+            )
+
             tool_schema = {
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": tool.params,
-                "strict": True,
+                "strict": all_required,
             }
 
             # openai requires 'additionalProperties': False
@@ -687,7 +739,19 @@ class OpenAIResponseModel(BaseChatModel):
         if len(tools) > 0:
             configs["tools"] = tools
             configs["tool_choice"] = self.tool_choice
-
+            
+        # always stateless
+        configs["store"] = False
+        
+        # check reasoning and add "include": ["reasoning.encrypted_content"] if it is not set for multi-turn reasoning; required for store=False.
+        if "reasoning" in configs:
+            include_fields = configs.get("include", [])
+            if "reasoning.encrypted_content" not in include_fields:
+                configs["include"] = include_fields + ["reasoning.encrypted_content"]
+                self.logger.warning(
+                    "Adding include: reasoning.encrypted_content. For multi-turn reasoning, one need to include 'reasoning.encrypted_content' in the 'include' config and set `store=False` for stateless reasoning."
+                )
+            
         return messages, configs, thread
 
     async def add_response_to_thread(
@@ -706,18 +770,21 @@ class OpenAIResponseModel(BaseChatModel):
                         result_text = c.text
 
                         if self.boolean_response is True:
-                            self.structured_response_model = BooleanContent
+                            # openai returns a json string
+                            _params = json.loads(result_text)
+                            content = BooleanContent(**_params)
 
-                        if self.structured_response_model is not None:
+                        elif self.structured_response_model is not None:
                             # openai returns a json string
                             _params = json.loads(result_text)
 
                             # check params
-                            self.structured_response_model(**_params)
+                            content = self.structured_response_model(**_params)
+                            content = StructuredContent(data=content)
+                        else:
+                            content = TextContent(data=str(result_text))
 
-                        result_content = TextContent(data=str(result_text))
-
-                        contents.append(result_content)
+                        contents.append(content)
                     else:
                         raise ValueError(f"Unknown content type: {c.type}")
 
@@ -725,7 +792,7 @@ class OpenAIResponseModel(BaseChatModel):
                 output_context = Context(
                     contents=contents,
                     provider_role=Role.ASSISTANT,
-                    provider_name=self.model,
+                    provider_name=__class__.__name__,
                     provider_context_id=item.id,
                 )
                 contexts.append(output_context)
@@ -734,27 +801,36 @@ class OpenAIResponseModel(BaseChatModel):
                 _params = json.loads(item.arguments)
 
                 tool_input_content = ToolInputContent(
-                    tool_name=item.name, tool_use_id=item.call_id, params=_params
+                    raw_data=item,
                 )
                 contexts.append(
                     Context(
                         contents=tool_input_content,
                         provider_role=Role.ASSISTANT,
-                        provider_name=self.model,
+                        provider_name=__class__.__name__,
                         provider_context_id=item.id,
                     )
                 )
                 # handle tool input if auto_tool_run is enabled
                 if self.auto_tool_run:
-                    tool_output_content = await self.handle_single_tool_response(
-                        content=tool_input_content
+                    output, is_error = await self.handle_single_tool_response(
+                        tool_name=item.name, params=_params
+                    )
+
+                    # package tool output using template
+                    tool_output = copy.deepcopy(self.PROMPT_TEMPLATE["tool_output"])
+                    tool_output["call_id"] = item.call_id
+                    tool_output["output"] = [await self.context_to_prompt(context=output, add_role=False)] # context_to_prompt returns a single object whereas output expects a list
+
+                    tool_output_content = ToolOutputContent(
+                        raw_data=tool_output,
                     )
 
                     contexts.append(
                         Context(
                             contents=tool_output_content,
                             provider_role=Role.USER,
-                            provider_name=None,
+                            provider_name=__class__.__name__,
                             provider_context_id=item.id,
                         )
                     )
@@ -762,8 +838,22 @@ class OpenAIResponseModel(BaseChatModel):
                 # Handle reasoning (thinking) blocks from OpenAI
                 for summary in item.summary:
                     self.logger.thinking(summary.text)
+                # Store the reasoning as ThoughtContent
+                contexts.append(
+                    Context(
+                        contents=ThoughtContent(raw_data=item),
+                        provider_role=Role.ASSISTANT,
+                        provider_name=__class__.__name__,
+                        provider_context_id=item.id,
+                    )
+                )
+                
+        # add raw response to contexts
+        for c in contexts:
+            c.raw_response = response
+                
         # add response to thread
-        await thread.append_contexts(contexts)
+        await thread.extend(contexts)
 
     async def acreate(
         self,
@@ -819,7 +909,7 @@ class OpenAIResponseModel(BaseChatModel):
 
             ## extend the base thread
             if base_thread is not None:
-                await base_thread.extend_thread(thread=thread)
+                await base_thread.extend(thread=thread)
             else:
                 base_thread = thread
 

@@ -1,0 +1,64 @@
+date,category,subcategory,merchant,amount,payment_method,notes,is_recurring
+2024-11-01,Housing,Rent,Parkside Apartments,2850.00,Bank Transfer,Monthly rent,True
+2024-11-01,Utilities,Internet,Comcast,89.99,Credit Card,Home internet,True
+2024-11-01,Subscriptions,Streaming,Netflix,15.99,Credit Card,,True
+2024-11-01,Subscriptions,Streaming,Spotify,10.99,Credit Card,Family plan,True
+2024-11-02,Food & Dining,Groceries,Whole Foods,127.43,Credit Card,Weekly groceries,False
+2024-11-02,Transportation,Gas,Shell,52.30,Debit Card,,False
+2024-11-03,Food & Dining,Restaurant,Chipotle,14.25,Credit Card,Lunch,False
+2024-11-03,Entertainment,Movies,AMC Theatres,28.50,Credit Card,2 tickets,False
+2024-11-04,Shopping,Clothing,Uniqlo,89.97,Credit Card,Winter jacket,False
+2024-11-05,Food & Dining,Coffee,Starbucks,6.45,Credit Card,,False
+2024-11-05,Health,Pharmacy,CVS,23.47,Debit Card,Vitamins,False
+2024-11-06,Food & Dining,Groceries,Trader Joes,84.32,Credit Card,,False
+2024-11-06,Transportation,Uber,Uber,18.50,Credit Card,Airport pickup,False
+2024-11-07,Food & Dining,Restaurant,Thai Basil,42.80,Credit Card,Dinner with friends,False
+2024-11-07,Food & Dining,Coffee,Blue Bottle,7.25,Credit Card,,False
+2024-11-08,Utilities,Electric,PG&E,134.56,Bank Transfer,Monthly bill,True
+2024-11-08,Shopping,Electronics,Amazon,149.99,Credit Card,Wireless earbuds,False
+2024-11-09,Food & Dining,Groceries,Costco,215.67,Debit Card,Bulk shopping,False
+2024-11-09,Transportation,Gas,Chevron,48.75,Credit Card,,False
+2024-11-10,Entertainment,Concert,Ticketmaster,125.00,Credit Card,Live show,False
+2024-11-10,Food & Dining,Restaurant,In-N-Out,12.35,Debit Card,,False
+2024-11-11,Food & Dining,Coffee,Starbucks,5.95,Credit Card,,False
+2024-11-11,Health,Gym,Equinox,189.00,Credit Card,Monthly membership,True
+2024-11-12,Food & Dining,Delivery,DoorDash,38.45,Credit Card,Dinner delivery,False
+2024-11-12,Shopping,Home,Target,67.82,Debit Card,Household items,False
+2024-11-13,Food & Dining,Groceries,Whole Foods,98.54,Credit Card,,False
+2024-11-13,Transportation,Parking,SF Parking,15.00,Credit Card,Downtown parking,False
+2024-11-14,Food & Dining,Restaurant,Olive Garden,56.78,Credit Card,Family dinner,False
+2024-11-14,Subscriptions,Software,Adobe CC,54.99,Credit Card,Creative Cloud,True
+2024-11-15,Utilities,Phone,Verizon,85.00,Bank Transfer,Mobile plan,True
+2024-11-15,Food & Dining,Coffee,Peets,6.80,Credit Card,,False
+2024-11-16,Shopping,Books,Barnes Noble,34.95,Credit Card,2 books,False
+2024-11-16,Food & Dining,Groceries,Safeway,72.13,Debit Card,,False
+2024-11-17,Entertainment,Games,Steam,29.99,Credit Card,Video game,False
+2024-11-17,Food & Dining,Restaurant,Panda Express,11.50,Debit Card,Lunch,False
+2024-11-18,Transportation,Gas,Shell,55.20,Credit Card,,False
+2024-11-18,Food & Dining,Coffee,Starbucks,7.15,Credit Card,,False
+2024-11-19,Health,Doctor,Kaiser,25.00,Debit Card,Copay,False
+2024-11-19,Food & Dining,Groceries,Trader Joes,91.24,Credit Card,,False
+2024-11-20,Food & Dining,Restaurant,Cheesecake Factory,78.45,Credit Card,Birthday dinner,False
+2024-11-20,Shopping,Gifts,Nordstrom,120.00,Credit Card,Birthday gift,False
+2024-11-21,Food & Dining,Delivery,Uber Eats,32.80,Credit Card,,False
+2024-11-21,Subscriptions,Cloud,iCloud,2.99,Credit Card,Storage,True
+2024-11-22,Food & Dining,Coffee,Blue Bottle,8.50,Credit Card,,False
+2024-11-22,Entertainment,Drinks,The Barrel,45.00,Credit Card,Happy hour,False
+2024-11-23,Food & Dining,Groceries,Whole Foods,143.21,Credit Card,Thanksgiving prep,False
+2024-11-23,Shopping,Home,Bed Bath Beyond,89.99,Debit Card,Kitchen items,False
+2024-11-24,Transportation,Uber,Uber,24.50,Credit Card,,False
+2024-11-24,Food & Dining,Restaurant,Mission Chinese,62.30,Credit Card,,False
+2024-11-25,Food & Dining,Coffee,Starbucks,6.25,Credit Card,,False
+2024-11-25,Utilities,Water,SFPUC,42.18,Bank Transfer,Bi-monthly,True
+2024-11-26,Food & Dining,Groceries,Costco,178.43,Debit Card,,False
+2024-11-26,Transportation,Gas,76,51.80,Credit Card,,False
+2024-11-27,Food & Dining,Restaurant,Dennys,28.90,Debit Card,Breakfast,False
+2024-11-27,Shopping,Clothing,H&M,65.00,Credit Card,Holiday outfit,False
+2024-11-28,Food & Dining,Groceries,Safeway,56.78,Debit Card,Thanksgiving extras,False
+2024-11-28,Entertainment,Streaming,Disney+,13.99,Credit Card,,True
+2024-11-29,Shopping,Electronics,Best Buy,299.99,Credit Card,Black Friday - monitor,False
+2024-11-29,Shopping,Clothing,Nike,145.00,Credit Card,Black Friday - shoes,False
+2024-11-29,Food & Dining,Restaurant,Buffalo Wild Wings,35.60,Credit Card,,False
+2024-11-30,Food & Dining,Groceries,Trader Joes,68.92,Credit Card,,False
+2024-11-30,Food & Dining,Coffee,Starbucks,5.75,Credit Card,,False
+2024-11-30,Transportation,Uber,Uber,16.25,Credit Card,,False

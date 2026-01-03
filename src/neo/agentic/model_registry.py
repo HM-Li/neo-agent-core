@@ -1,11 +1,11 @@
-import difflib
 from typing import Callable, List, Literal, Optional
 
 from pydantic import BaseModel
+from rapidfuzz import fuzz, process
 
 from neo.mcp.client import MCPClient
 from neo.models.providers.anthropic import AnthropicModel
-from neo.models.providers.base import BaseChatModel
+from neo.models.base import BaseChatModel
 from neo.models.providers.google import GoogleAIModel
 from neo.models.providers.openai import OpenAICompleteModel, OpenAIResponseModel
 from neo.models.providers.xai import XAIModel
@@ -84,21 +84,22 @@ class ModelRegistry(metaclass=Singleton):
             raise KeyError(f"No model has been registered under the model '{model}'")
 
         # Find closest match using edit distance
-        closest_match = difflib.get_close_matches(
-            model, self._registry.keys(), n=1, cutoff=0.0
-        )
-        if not closest_match:
+        result = process.extractOne(model, self._registry.keys(), scorer=fuzz.ratio)
+        if not result:
             raise KeyError(f"No model has been registered under the model '{model}'")
+        
+        closest_match, edit_distance, _ = result
 
         self.logger.warning(
-            f"Model '{model}' not found. Using closest match: '{closest_match[0]}'"
+            f"Model '{model}' not found. Using closest match: '{closest_match}' (edit distance: {edit_distance})"
         )
-
-        return self._registry[closest_match[0]]
+    
+        return self._registry[closest_match]
 
     def create_model(
         self,
         model: str,
+        fuzzy_mode: bool = False,
         input_modalities: Optional[List[Modality]] = None,
         output_modalities: Optional[List[Modality]] = None,
         instruction: Optional[str] = None,
@@ -111,8 +112,6 @@ class ModelRegistry(metaclass=Singleton):
         mcp_clients: Optional[List[MCPClient]] = None,
         tool_choice: Literal["auto", "required"] = "auto",
         timeaware: bool = False,
-        enable_thinking: bool = None,
-        thinking_budget_tokens: int = None,
         tool_preamble: bool = False,
         auto_tool_run: bool = True,
     ) -> BaseChatModel:
@@ -137,11 +136,8 @@ class ModelRegistry(metaclass=Singleton):
         BaseChatModel
             An instance of the registered model.
         """
-        model = model.lower()
-        if model not in self._registry:
-            raise KeyError(f"No model has been registered under the name '{model}'")
-
-        model_registry = self._registry[model]
+        model_registry = self.get_model_registry(model, fuzzy_mode=fuzzy_mode)
+        
         cls = model_registry["class"]
         input_modalities = model_registry["input_modalities"]
 
@@ -159,8 +155,6 @@ class ModelRegistry(metaclass=Singleton):
             mcp_clients=mcp_clients,
             tool_choice=tool_choice,
             timeaware=timeaware,
-            enable_thinking=enable_thinking,
-            thinking_budget_tokens=thinking_budget_tokens,
             tool_preamble=tool_preamble,
             auto_tool_run=auto_tool_run,
         )

@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Optional, Dict
 from contextlib import AsyncExitStack
 
@@ -13,15 +14,27 @@ from neo.types import contents
 
 
 class MCPClient:
-    def __init__(self, name: str, server_script_path: str):
+    def __init__(
+        self,
+        name: str,
+        command: str,
+        args: list[str] = [],
+        env: Optional[Dict[str, str]] = None,
+    ):
         """Initialize the MCP client
+
         Args:
             name: Name of the client
+            command: Command to run the MCP server (e.g., 'python', 'node', 'docker', 'npx')
+            args: Arguments to pass to the command (default: [])
+            env: Environment variables to merge with system environment (default: None)
         """
         self.name = name
         self.session: Optional[ClientSession] = None
         self.exit_stack = None
-        self.server_script_path: str = server_script_path
+        self.command: str = command
+        self.args: list[str] = args
+        self.env: Optional[Dict[str, str]] = env
         self.stdio = None
         self.write = None
         self.tools: Dict[Tool] = {}
@@ -29,12 +42,12 @@ class MCPClient:
         self._cleanup_lock = asyncio.Lock()
         self.logger = get_logger(f"MCPClient-{name}")
 
-    async def aconnect(self):
-        """Connect to an MCP server
+    def is_connected(self) -> bool:
+        """Check if the client is currently connected to a server"""
+        return self.exit_stack is not None and self.session is not None
 
-        Args:
-            server_script_path: Path to the server script (.py or .js)
-        """
+    async def aconnect(self):
+        """Connect to an MCP server using the configured command and args"""
         try:
             if self.exit_stack is not None:
                 # prevent exiting context manager if already connected and not closed
@@ -43,14 +56,14 @@ class MCPClient:
                 )
 
             self.exit_stack = AsyncExitStack()
-            is_python = self.server_script_path.endswith(".py")
-            is_js = self.server_script_path.endswith(".js")
-            if not (is_python or is_js):
-                raise ValueError("Server script must be a .py or .js file")
 
-            command = "python" if is_python else "node"
+            # Merge custom env with system environment if provided
+            merged_env = os.environ.copy() if self.env else None
+            if self.env and merged_env:
+                merged_env.update(self.env)
+
             server_params = StdioServerParameters(
-                command=command, args=[self.server_script_path], env=None
+                command=self.command, args=self.args, env=merged_env
             )
 
             stdio_transport = await self.exit_stack.enter_async_context(
@@ -98,6 +111,24 @@ class MCPClient:
                 self.tools = {}
 
                 self.logger.info(f"Closed connection to MCP server {self.name}")
+            except RuntimeError as e:
+                # Handle Jupyter notebook context switching issues
+                if "cancel scope" in str(e) or "different task" in str(e):
+                    self.logger.warning(
+                        f"Clean shutdown not possible (likely Jupyter notebook context): {e}. "
+                        "Resources will be cleaned up by the kernel."
+                    )
+                    # Force cleanup of references
+                    self.exit_stack = None
+                    self.session = None
+                    self.stdio = None
+                    self.write = None
+                    self.tools = {}
+                else:
+                    self.logger.error(
+                        f"Error closing connection to MCP server {self.name}: {e}"
+                    )
+                    raise
             except Exception as e:
                 self.logger.error(
                     f"Error closing connection to MCP server {self.name}: {e}"
