@@ -380,7 +380,7 @@ class Neo:
                 if user_input_for_round is None and not last_context_is_user:
                     user_input_for_round = self.default_user_input
 
-                _ = await model.acreate(
+                generated_thread = await model.acreate(
                     user_input=user_input_for_round,
                     base_thread=task_thread,
                     return_generated_thread=True,
@@ -402,7 +402,7 @@ class Neo:
                         )
 
                 # refresh the unfinished deliverable
-                task.unfinished_deliverable = task_thread
+                await task.unfinished_deliverable.extend(generated_thread)
 
                 # Check if the last context has tool output content
                 last_context = await task_thread.aget(-1)
